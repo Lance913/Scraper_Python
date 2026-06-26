@@ -2,18 +2,22 @@
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
 
-Key insight: ViewECdocs.aspx uses a session token in the ?ID= param.
-The token is only valid inside the same browser session that generated it.
-HTTP requests from a different session get 404.
-FIX: Stay inside the same Playwright browser to fetch detail pages.
+The ViewECdocs.aspx document viewer lives in a separate IIS app from the
+search portal — session tokens do not carry across, so detail pages always
+return 404 regardless of whether we use HTTP or Playwright. Names/addresses
+are only inside scanned document images (not extractable via text).
+
+DECISION: Store doc_id (FRCL-XXXX-XXXX) in the sheet so George's team can
+look up names/addresses manually on the Harris portal if needed.
 
 Table column layout: [checkbox][doc_id][sale_date][file_date][pages]
+Month strategy: scrape current + next month each daily run.
+Dedup: handled by sheets_writer using county+doc_id.
 """
 
 import re
-import time
 from datetime import date
-from typing import List, Dict, Optional
+from typing import List, Dict
 from bs4 import BeautifulSoup
 from .base import BaseScraper
 
@@ -38,8 +42,7 @@ class HarrisCountyScraper(BaseScraper):
     def scrape(self, target_date: date) -> List[Dict]:
         self.logger.info(f"Scraping Harris County for {target_date}")
 
-        months_to_scrape = []
-        months_to_scrape.append((target_date.year, target_date.month))
+        months_to_scrape = [(target_date.year, target_date.month)]
         if target_date.month == 12:
             months_to_scrape.append((target_date.year + 1, 1))
         else:
@@ -75,7 +78,6 @@ class HarrisCountyScraper(BaseScraper):
                 )
                 page.set_default_timeout(30_000)
 
-                # ── 1. Load search results ───────────────────────────────
                 self.logger.info(f"Harris: loading portal for {month_str} {year_val}...")
                 page.goto(SEARCH_URL)
                 page.wait_for_load_state('networkidle')
@@ -105,71 +107,37 @@ class HarrisCountyScraper(BaseScraper):
                         page.click(f'input[name="{SEARCH_NAME}"]')
                     self.logger.info(f"Harris: Search clicked for {month_str} {year_val}")
                 except Exception as e:
-                    self.logger.warning(f"Harris: Search click: {e}")
+                    self.logger.warning(f"Harris: Search click error: {e}")
                 page.wait_for_timeout(3000)
 
                 content = page.content()
-                soup    = BeautifulSoup(content, 'lxml')
-                rows    = self._parse_results_table(soup)
-                self.logger.info(f"Harris: {len(rows)} rows for {month_str} {year_val}")
-                if rows:
-                    self.logger.info(f"Harris: sample row: {rows[0]}")
-
-                # ── 2. Fetch detail pages WITHIN the same browser session ─
-                # The ?ID= token is session-scoped; HTTP requests from a
-                # different session get 404. Stay inside Playwright.
-                results_url = page.url
-
-                for row in rows:
-                    detail_url = row.get('detail_url', '')
-                    first, last, address, city, zip_code = '', '', '', '', ''
-
-                    if detail_url:
-                        try:
-                            page.goto(detail_url)
-                            page.wait_for_load_state('networkidle', timeout=12_000)
-                            page.wait_for_timeout(500)
-                            detail_text = page.inner_text('body')
-                            if not records:  # Log first detail page only
-                                self.logger.info(
-                                    f"Harris DETAIL PAGE SAMPLE "
-                                    f"({len(detail_text)} chars): "
-                                    + detail_text[:500].replace(chr(10),' ')[:300]
-                                )
-                            parsed   = self._parse_detail_text(detail_text)
-                            first    = parsed.get('first_name', '')
-                            last     = parsed.get('last_name', '')
-                            address  = parsed.get('address', '')
-                            city     = parsed.get('city', '')
-                            zip_code = parsed.get('zip_code', '')
-                        except Exception as e:
-                            self.logger.warning(f"Harris: detail page error: {e}")
-
-                    records.append(self.build_record(
-                        first_name=first,
-                        last_name=last,
-                        address=address,
-                        city=city,
-                        zip_code=zip_code,
-                        file_date=row.get('file_date', ''),
-                        sale_date=row.get('sale_date', ''),
-                    ))
-                    page.wait_for_timeout(150)
-
                 browser.close()
+
+            soup  = BeautifulSoup(content, 'lxml')
+            rows  = self._parse_results_table(soup)
+            self.logger.info(f"Harris: {len(rows)} rows for {month_str} {year_val}")
+            if rows:
+                self.logger.info(f"Harris: sample: {rows[0]}")
+
+            # No detail page fetch — ViewECdocs lives in a separate IIS app;
+            # its session tokens are not shareable. Names/addresses unavailable.
+            for row in rows:
+                records.append(self.build_record(
+                    doc_id=    row.get('doc_id', ''),
+                    file_date= row.get('file_date', ''),
+                    sale_date= row.get('sale_date', ''),
+                ))
 
         except Exception as exc:
             self.logger.error(f"Harris {month_str} {year_val} error: {exc}", exc_info=True)
 
         return records
 
-    # ── Results table ──────────────────────────────────────────────────────
-
     def _parse_results_table(self, soup: BeautifulSoup) -> List[Dict]:
         """
         Confirmed column layout:
           tds[0] = checkbox (empty)
-          tds[1] = Doc ID (FRCL-YYYY-XXXX) — link here
+          tds[1] = Doc ID (FRCL-YYYY-XXXX)
           tds[2] = Sale Date (MM/DD/YYYY)
           tds[3] = File Date (MM/DD/YYYY)
           tds[4] = Pages
@@ -178,8 +146,7 @@ class HarrisCountyScraper(BaseScraper):
 
         target_table = None
         for t in soup.find_all('table'):
-            txt = t.get_text()
-            if 'FRCL' in txt and re.search(r'\d{2}/\d{2}/\d{4}', txt):
+            if 'FRCL' in t.get_text() and re.search(r'\d{2}/\d{2}/\d{4}', t.get_text()):
                 target_table = t
                 break
 
@@ -203,57 +170,10 @@ class HarrisCountyScraper(BaseScraper):
             if not re.match(r'\d{1,2}/\d{1,2}/\d{4}', file_date):
                 continue
 
-            link_tag   = tds[1].find('a')
-            detail_url = ''
-            if link_tag and link_tag.get('href'):
-                href = link_tag['href']
-                if href.startswith('http'):
-                    detail_url = href
-                elif href.startswith('/'):
-                    detail_url = BASE_URL + href
-                else:
-                    detail_url = BASE_URL + '/' + href
-
             rows.append({
-                'doc_id':     doc_id,
-                'sale_date':  sale_date,
-                'file_date':  file_date,
-                'detail_url': detail_url,
+                'doc_id':    doc_id,
+                'sale_date': sale_date,
+                'file_date': file_date,
             })
 
         return rows
-
-    # ── Detail page parsing ────────────────────────────────────────────────
-
-    def _parse_detail_text(self, text: str) -> Dict:
-        """Parse grantor name and property address from the detail page text."""
-        result = {'first_name': '', 'last_name': '', 'address': '', 'city': '', 'zip_code': ''}
-
-        # Grantor name (multiple patterns for different doc formats)
-        name_patterns = [
-            r'Grantor[:\s]+([A-Z][A-Z\s,\.]+?)(?:\n|Grantee|Trustee|Said|Dated|$)',
-            r'GRANTOR[:\s]+([A-Z][A-Z\s,\.]+?)(?:\n|GRANTEE|TRUSTEE)',
-            r'Mortgagor[:\s]+([A-Z][A-Z\s,\.]+?)(?:\n|Mortgagee)',
-        ]
-        for pat in name_patterns:
-            m = re.search(pat, text, re.I)
-            if m:
-                raw = m.group(1).strip().strip(',').strip()
-                if len(raw) > 2:
-                    result['first_name'], result['last_name'] = self.parse_name(raw)
-                    break
-
-        # Address — look for street number pattern near city/TX/zip
-        addr_pat = (
-            r'(\d+\s+[A-Z0-9][A-Z0-9\s]+?'
-            r'(?:STREET|ST|AVENUE|AVE|DRIVE|DR|ROAD|RD|LANE|LN|BOULEVARD|BLVD|'
-            r'COURT|CT|WAY|PLACE|PL|CIRCLE|CIR|TRAIL|TRL|PARKWAY|PKWY)[A-Z\s\.]*?)'
-            r',?\s+([A-Z][A-Z\s]+?),?\s+TX\s*(\d{5})'
-        )
-        m2 = re.search(addr_pat, text, re.I)
-        if m2:
-            result['address']  = m2.group(1).strip().title()
-            result['city']     = m2.group(2).strip().title()
-            result['zip_code'] = m2.group(3)
-
-        return result
