@@ -1,19 +1,27 @@
 """
 PublicSearch.us Scraper — Bexar, Dallas, Tarrant
 
-Key findings from debug run:
-- Page loads Quick Search form but makes NO API calls until user searches
-- Need to: click Advanced Search → fill date range → click Search → extract results
-- Portal data is certified 2-3 days behind, so we search last 7 days
-- Capture API responses AND extract from rendered DOM table
+Advanced Search form fields confirmed:
+  - Recorded Date Range → Start date / End date (MM/DD/YYYY)
+  - Instrument Date Range → Start date / End date
+  - Document Types filter
+  - Search button
+
+Fix: use page.fill(selector, value) instead of ElementHandle.triple_click()
+Fix: convert dates from YYYY-MM-DD to MM/DD/YYYY
 """
 
-import json
 import re
 from datetime import date, timedelta
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from .base import BaseScraper
+
+
+def to_mddyyyy(iso: str) -> str:
+    """Convert '2026-06-19' → '06/19/2026'"""
+    parts = iso.split('-')
+    return f"{parts[1]}/{parts[2]}/{parts[0]}"
 
 
 class PublicSearchScraper(BaseScraper):
@@ -26,23 +34,23 @@ class PublicSearchScraper(BaseScraper):
 
     def scrape(self, target_date: date) -> List[Dict]:
         self.logger.info(f"Scraping {self.county} County for {target_date}")
-        # Search last 7 days — portal certifies data 2-3 days behind
-        start_date = (target_date - timedelta(days=7)).strftime('%Y-%m-%d')
-        end_date   = target_date.strftime('%Y-%m-%d')
-
-        records = self._playwright_scrape(start_date, end_date)
+        # Search last 7 days — portal is certified 2-4 days behind
+        start_iso = (target_date - timedelta(days=7)).strftime('%Y-%m-%d')
+        end_iso   = target_date.strftime('%Y-%m-%d')
+        records   = self._playwright_scrape(start_iso, end_iso)
         if records is None:
             records = []
         self.logger.info(f"{self.county}: {len(records)} records")
         return records
 
-    # ── Playwright ────────────────────────────────────────────────────────────
-
-    def _playwright_scrape(self, start_date: str, end_date: str) -> Optional[List[Dict]]:
+    def _playwright_scrape(self, start_iso: str, end_iso: str) -> Optional[List[Dict]]:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
             return None
+
+        start_fmt = to_mddyyyy(start_iso)   # MM/DD/YYYY
+        end_fmt   = to_mddyyyy(end_iso)
 
         captured_json = []
 
@@ -55,7 +63,7 @@ class PublicSearchScraper(BaseScraper):
                     return
                 data = response.json()
                 keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
-                self.logger.info(f"{self.county}: JSON from {response.url} — keys:{keys}")
+                self.logger.info(f"{self.county}: JSON from {response.url} keys:{keys}")
                 captured_json.append({'url': response.url, 'data': data})
             except Exception:
                 pass
@@ -71,63 +79,55 @@ class PublicSearchScraper(BaseScraper):
                 page.on('response', on_response)
                 page.set_default_timeout(30_000)
 
-                # ── Step 1: Load portal ────────────────────────────────────
+                # ── Load portal and go to Advanced Search ──────────────────
                 self.logger.info(f"{self.county}: loading portal...")
                 page.goto(self.base_url)
                 page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1500)
 
-                # ── Step 2: Click Advanced Search ──────────────────────────
-                adv_clicked = False
-                for sel in ['text=Advanced Search', 'a:has-text("Advanced")', '[href*="advanced" i]']:
-                    el = page.query_selector(sel)
-                    if el:
-                        el.click()
-                        page.wait_for_load_state('networkidle')
-                        page.wait_for_timeout(2000)
-                        self.logger.info(f"{self.county}: clicked Advanced Search via '{sel}'")
-                        adv_clicked = True
-                        break
+                page.locator('text=Advanced Search').first.click()
+                page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(1500)
 
-                body_adv = page.inner_text('body')
-                self.logger.info(f"{self.county} advanced search form: {body_adv[:800]}")
+                # ── Fill Recorded Date Range ───────────────────────────────
+                # Form labels: "Recorded Date Range" → Start date / End date
+                # Date format: MM/DD/YYYY (confirmed from form)
+                filled = self._fill_date_range(page, start_fmt, end_fmt)
+                self.logger.info(f"{self.county}: date fill → {filled}")
 
-                # ── Step 3: Fill date range ────────────────────────────────
-                filled = self._fill_dates(page, start_date, end_date)
-                self.logger.info(f"{self.county}: date fill result: {filled}")
-
-                # ── Step 4: Click Search ───────────────────────────────────
+                # ── Click Search ───────────────────────────────────────────
                 for btn_sel in [
                     'button[type="submit"]',
                     'button:has-text("Search")',
                     'input[type="submit"]',
-                    '[class*="search" i][class*="btn" i]',
                 ]:
-                    btn = page.query_selector(btn_sel)
-                    if btn:
-                        btn.click()
-                        self.logger.info(f"{self.county}: clicked Search via '{btn_sel}'")
-                        break
+                    try:
+                        btn = page.locator(btn_sel).first
+                        if btn.count() > 0:
+                            btn.click()
+                            self.logger.info(f"{self.county}: clicked Search via '{btn_sel}'")
+                            break
+                    except Exception:
+                        pass
 
-                # ── Step 5: Wait for results ───────────────────────────────
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(4000)
 
-                body_results = page.inner_text('body')
-                self.logger.info(f"{self.county} after search: {body_results[:800]}")
+                body = page.inner_text('body')
+                self.logger.info(f"{self.county} results body: {body[:800]}")
 
                 html_content = page.content()
                 browser.close()
 
-            # ── Parse captured API responses ───────────────────────────────
+            # Parse API responses
             records = []
             for entry in captured_json:
-                records.extend(self._parse_json(entry['data'], end_date))
+                records.extend(self._parse_json(entry['data'], end_iso))
 
-            # ── DOM fallback ───────────────────────────────────────────────
+            # DOM fallback
             if not records:
-                self.logger.info(f"{self.county}: no API JSON captured, trying DOM")
-                records = self._parse_dom(html_content, end_date)
+                self.logger.info(f"{self.county}: trying DOM extraction")
+                records = self._parse_dom(html_content, end_iso)
 
             return records
 
@@ -135,49 +135,46 @@ class PublicSearchScraper(BaseScraper):
             self.logger.error(f"{self.county}: Playwright error: {exc}", exc_info=True)
             return None
 
-    def _fill_dates(self, page, start_date: str, end_date: str) -> bool:
-        """Try every known date-input pattern on the advanced search form."""
-        patterns = [
-            # Placeholder-based
-            ('input[placeholder*="Start" i]',         'input[placeholder*="End" i]'),
-            ('input[placeholder*="From" i]',           'input[placeholder*="To" i]'),
-            ('input[placeholder*="Begin" i]',          'input[placeholder*="End" i]'),
-            # aria-label
-            ('input[aria-label*="Start" i]',           'input[aria-label*="End" i]'),
-            ('input[aria-label*="From" i]',            'input[aria-label*="To" i]'),
-            ('input[aria-label*="Filing Date From" i]','input[aria-label*="Filing Date To" i]'),
-            # id/name
-            ('input[id*="startDate" i]',               'input[id*="endDate" i]'),
-            ('input[name*="start" i]',                 'input[name*="end" i]'),
-            # Generic — first two date inputs on page
+    def _fill_date_range(self, page, start_fmt: str, end_fmt: str) -> str:
+        """
+        Fill the Recorded Date Range fields.
+        Confirmed field labels: 'Start date' and 'End date' inside 'Recorded Date Range'.
+        Uses page.fill() with selector (no ElementHandle needed).
+        """
+        # Strategy 1: placeholder-based (most reliable)
+        pairs = [
+            ('input[placeholder="Start date"]',  'input[placeholder="End date"]'),
+            ('input[placeholder*="Start" i]',    'input[placeholder*="End" i]'),
+            ('input[aria-label*="Start" i]',     'input[aria-label*="End" i]'),
+            ('input[id*="start" i]',             'input[id*="end" i]'),
         ]
 
-        for start_sel, end_sel in patterns:
-            start_el = page.query_selector(start_sel)
-            end_el   = page.query_selector(end_sel)
-            if start_el and end_el:
-                start_el.triple_click()
-                start_el.fill(start_date)
-                end_el.triple_click()
-                end_el.fill(end_date)
-                page.wait_for_timeout(500)
-                self.logger.info(f"{self.county}: filled '{start_sel}' / '{end_sel}'")
-                return True
+        for start_sel, end_sel in pairs:
+            try:
+                start_els = page.locator(start_sel)
+                end_els   = page.locator(end_sel)
+                if start_els.count() > 0 and end_els.count() > 0:
+                    page.fill(start_sel, start_fmt)
+                    page.fill(end_sel, end_fmt)
+                    page.wait_for_timeout(300)
+                    return f"filled '{start_sel}' with {start_fmt} / {end_fmt}"
+            except Exception:
+                pass
 
-        # Last resort: fill first two <input type="text"> on page
-        inputs = page.query_selector_all('input[type="text"], input:not([type])')
-        date_inputs = [i for i in inputs if i.is_visible()]
-        if len(date_inputs) >= 2:
-            date_inputs[0].triple_click()
-            date_inputs[0].fill(start_date)
-            date_inputs[1].triple_click()
-            date_inputs[1].fill(end_date)
-            self.logger.info(f"{self.county}: filled first 2 visible text inputs")
-            return True
+        # Strategy 2: all visible text inputs in order
+        try:
+            inputs = page.locator('input[type="text"], input:not([type])').all()
+            visible = [i for i in inputs if i.is_visible()]
+            self.logger.info(f"{self.county}: visible text inputs: {len(visible)}")
+            if len(visible) >= 2:
+                visible[0].fill(start_fmt)
+                visible[1].fill(end_fmt)
+                page.wait_for_timeout(300)
+                return f"filled first 2 visible inputs with {start_fmt} / {end_fmt}"
+        except Exception as e:
+            self.logger.warning(f"{self.county}: input fill fallback failed: {e}")
 
-        return False
-
-    # ── Parsers ───────────────────────────────────────────────────────────────
+        return "no fields filled"
 
     def _parse_json(self, data, date_str: str) -> List[Dict]:
         items = (

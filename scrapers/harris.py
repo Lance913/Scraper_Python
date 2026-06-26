@@ -2,9 +2,8 @@
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
 
-The page uses ASP.NET WebForms with Telerik RadComboBox dropdowns.
-Year/month list items exist in the DOM but are CSS-hidden inside the dropdown.
-We use JavaScript .click() to bypass CSS visibility and trigger the postback.
+Uses TreeWalker to find exact text nodes for year/month,
+then force-clicks the parent element to bypass CSS visibility.
 """
 
 import re
@@ -22,6 +21,24 @@ MONTH_NAMES = {
     5: 'May',     6: 'June',     7: 'July',      8: 'August',
     9: 'September', 10: 'October', 11: 'November', 12: 'December',
 }
+
+JS_CLICK_TEXT = """
+    (text) => {
+        // TreeWalker finds exact text nodes regardless of element tag
+        const walker = document.createTreeWalker(
+            document.body, NodeFilter.SHOW_TEXT
+        );
+        let node;
+        while (node = walker.nextNode()) {
+            if (node.textContent.trim() === text) {
+                const el = node.parentElement;
+                el.click();
+                return el.tagName + '|' + el.className + '|' + el.id;
+            }
+        }
+        return null;
+    }
+"""
 
 
 class HarrisCountyScraper(BaseScraper):
@@ -51,49 +68,36 @@ class HarrisCountyScraper(BaseScraper):
                 self.logger.info("Harris: loading portal...")
                 page.goto(SEARCH_URL)
                 page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(1000)
 
-                # ── Click year via JavaScript (bypasses CSS hidden state) ──
-                clicked_year = page.evaluate(f"""
-                    () => {{
-                        const all = document.querySelectorAll('a, li, span, div');
-                        for (const el of all) {{
-                            if (el.textContent.trim() === '{year_str}') {{
-                                el.click();
-                                return true;
-                            }}
-                        }}
-                        return false;
-                    }}
-                """)
-                self.logger.info(f"Harris: JS year click result: {clicked_year}")
+                # ── Click year via TreeWalker ──────────────────────────────
+                year_result = page.evaluate(JS_CLICK_TEXT, year_str)
+                self.logger.info(f"Harris: year click → {year_result}")
                 page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1500)
 
-                # ── Click month via JavaScript ─────────────────────────────
-                clicked_month = page.evaluate(f"""
-                    () => {{
-                        const all = document.querySelectorAll('a, li, span, div');
-                        for (const el of all) {{
-                            if (el.textContent.trim() === '{month_str}') {{
-                                el.click();
-                                return true;
-                            }}
-                        }}
-                        return false;
-                    }}
-                """)
-                self.logger.info(f"Harris: JS month click result: {clicked_month}")
+                # ── Click month via TreeWalker ─────────────────────────────
+                month_result = page.evaluate(JS_CLICK_TEXT, month_str)
+                self.logger.info(f"Harris: month click → {month_result}")
                 page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1500)
 
-                # ── Log body to confirm results loaded ─────────────────────
+                # ── Fallback: force-click via Playwright Locator ───────────
+                if not month_result:
+                    try:
+                        page.locator(f'text="{month_str}"').first.click(force=True)
+                        page.wait_for_load_state('networkidle')
+                        page.wait_for_timeout(1500)
+                        self.logger.info(f"Harris: month force-clicked via Locator")
+                    except Exception as e:
+                        self.logger.warning(f"Harris: force-click also failed: {e}")
+
                 body = page.inner_text('body')
-                self.logger.info(f"Harris body after month select (first 600): {body[:600]}")
+                self.logger.info(f"Harris body after selections: {body[:600]}")
 
                 content = page.content()
                 browser.close()
 
-            # ── Parse results ──────────────────────────────────────────────
             soup = BeautifulSoup(content, 'lxml')
             rows = self._parse_results_table(soup)
             self.logger.info(f"Harris: {len(rows)} rows found for {month_str} {year_str}")
@@ -124,9 +128,8 @@ class HarrisCountyScraper(BaseScraper):
             or soup.find('table')
         )
         if not table:
-            self.logger.warning("Harris: no results table in HTML")
+            self.logger.warning("Harris: no results table found in HTML")
             return rows
-
         for tr in table.find_all('tr')[1:]:
             tds = tr.find_all('td')
             if len(tds) < 3:
