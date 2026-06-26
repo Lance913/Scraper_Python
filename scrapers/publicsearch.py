@@ -89,16 +89,18 @@ class PublicSearchScraper(BaseScraper):
 
         try:
             with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True)
+                browser = pw.chromium.launch(
+                    headless=True,
+                    args=['--disable-blink-features=AutomationControlled']
+                )
                 context = browser.new_context(user_agent=(
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
                 ))
-                # Hide webdriver flag so portal doesn't show "browser outdated" warning
-                context.add_init_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => false})"
-                )
                 page = context.new_page()
+                page.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                )
                 page.set_default_timeout(30_000)
 
                 self.logger.info(f"{self.county}: loading advanced search...")

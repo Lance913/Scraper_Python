@@ -2,22 +2,35 @@
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
 
-HTTP POST approach — bypasses Telerik RadComboBox UI entirely.
-  GET page → capture ViewState → single POST with year+month → parse table.
+The portal is JavaScript-rendered — HTTP POST returns an HTML shell with
+no results table. Playwright must execute the JavaScript.
 
-UpdatePanel detection: check if response starts with digit (pipe-delimited format)
-vs full HTML (starts with <).
+Telerik RadComboBox fix: call __doPostBack() directly instead of
+fighting Telerik's UI. __doPostBack is ASP.NET WebForms' native form
+submission function. It sets __EVENTTARGET and calls form.submit().
+This bypasses Telerik's client-side event system entirely.
+
+Flow:
+  1. Playwright loads page
+  2. JS: read option values from month <select>
+  3. JS: sel.value = year → __doPostBack('...ddlYear', '') → page reloads
+  4. JS: sel.value = month → __doPostBack('...ddlMonth', '') → results load
+  5. Parse results table (Doc ID / Sale Date / File Date)
+  6. Filter to target_date, fetch detail for name/address
 """
 
 import re
 import time
 from datetime import date
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from .base import BaseScraper
 
 SEARCH_URL = "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx"
 BASE_URL   = "https://www.cclerk.hctx.net"
+
+YEAR_NAME  = 'ctl00$ContentPlaceHolder1$ddlYear'
+MONTH_NAME = 'ctl00$ContentPlaceHolder1$ddlMonth'
 
 MONTH_LABELS = {
     1: 'January', 2: 'February', 3: 'March',    4: 'April',
@@ -33,70 +46,100 @@ class HarrisCountyScraper(BaseScraper):
 
     def scrape(self, target_date: date) -> List[Dict]:
         self.logger.info(f"Scraping Harris County for {target_date}")
-        records   = []
-        year_str  = str(target_date.year)
-        month_str = MONTH_LABELS[target_date.month]
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.logger.error("Playwright not installed")
+            return []
+
+        records    = []
+        year_str   = str(target_date.year)
+        month_str  = MONTH_LABELS[target_date.month]
         target_file = f"{target_date.month}/{target_date.day}/{target_date.year}"
 
         try:
-            # ── GET initial page ───────────────────────────────────────────
-            resp = self.get(SEARCH_URL)
-            if not resp:
-                self.logger.error("Harris: could not load portal")
-                return []
-
-            soup, form_data = self._parse_form(resp.text)
-            self.logger.info(f"Harris: loaded portal (ViewState len={len(form_data.get('__VIEWSTATE',''))})")
-            self.logger.info(f"Harris: form fields: {[k for k in form_data if not k.startswith('__')]}")
-
-            # ── Step 1: select year ────────────────────────────────────────
-            # Some ASP.NET sites need the year change before month can be selected
-            form_data['__EVENTTARGET']   = 'ctl00$ContentPlaceHolder1$ddlYear'
-            form_data['__EVENTARGUMENT'] = ''
-            form_data['ctl00$ContentPlaceHolder1$ddlYear']  = year_str
-            form_data['ctl00$ContentPlaceHolder1$ddlMonth'] = 'Select -'
-
-            resp2 = self.post(SEARCH_URL, data=form_data)
-            if not resp2:
-                self.logger.error("Harris: year POST failed")
-                return []
-
-            html2 = self._extract_html(resp2.text)
-            self.logger.info(f"Harris: year POST → {len(html2)} chars; first 300: {repr(html2[:300])}")
-
-            soup2, form2 = self._parse_form(html2)
-
-            # ── Step 2: select month ───────────────────────────────────────
-            form2['__EVENTTARGET']   = 'ctl00$ContentPlaceHolder1$ddlMonth'
-            form2['__EVENTARGUMENT'] = ''
-            form2['ctl00$ContentPlaceHolder1$ddlYear']  = year_str
-            form2['ctl00$ContentPlaceHolder1$ddlMonth'] = month_str
-
-            resp3 = self.post(SEARCH_URL, data=form2)
-            if not resp3:
-                self.logger.error("Harris: month POST failed")
-                return []
-
-            html3 = self._extract_html(resp3.text)
-            self.logger.info(f"Harris: month POST → {len(html3)} chars; first 600: {repr(html3[:600])}")
-
-            soup3 = BeautifulSoup(html3, 'lxml')
-
-            # Log ALL tables found
-            all_tables = soup3.find_all('table')
-            self.logger.info(f"Harris: {len(all_tables)} tables in response")
-            for i, t in enumerate(all_tables[:5]):
-                rows = t.find_all('tr')
-                self.logger.info(
-                    f"Harris: table[{i}] id={t.get('id')} "
-                    f"class={t.get('class')} rows={len(rows)} "
-                    f"text[:80]={t.get_text(' ', strip=True)[:80]}"
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(
+                    headless=True,
+                    args=['--disable-blink-features=AutomationControlled']
                 )
+                page = browser.new_page()
+                page.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                )
+                page.set_default_timeout(30_000)
 
-            rows = self._parse_results_table(soup3)
+                self.logger.info("Harris: loading portal...")
+                page.goto(SEARCH_URL)
+                page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(1000)
+
+                # ── Log what option values exist for month <select> ────────
+                month_opts = page.evaluate(f"""
+                    () => {{
+                        var sel = document.querySelector('select[name="{MONTH_NAME}"]');
+                        if (!sel) return 'month select not found';
+                        return Array.from(sel.options).map(o => o.value).join(',');
+                    }}
+                """)
+                self.logger.info(f"Harris: month option values: {month_opts}")
+
+                # ── Select year via __doPostBack ───────────────────────────
+                year_res = page.evaluate(f"""
+                    () => {{
+                        var sel = document.querySelector('select[name="{YEAR_NAME}"]');
+                        if (!sel) return 'year select not found';
+                        sel.value = '{year_str}';
+                        try {{
+                            __doPostBack('{YEAR_NAME}', '');
+                            return 'doPostBack: year=' + sel.value;
+                        }} catch(e) {{
+                            return 'doPostBack error: ' + e.message;
+                        }}
+                    }}
+                """)
+                self.logger.info(f"Harris: year → {year_res}")
+                page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(2000)
+
+                # ── Select month via __doPostBack ──────────────────────────
+                month_res = page.evaluate(f"""
+                    () => {{
+                        var sel = document.querySelector('select[name="{MONTH_NAME}"]');
+                        if (!sel) return 'month select not found';
+                        // Try exact match first, then startsWith
+                        var opts = Array.from(sel.options);
+                        var match = opts.find(o => o.value === '{month_str}' || o.text === '{month_str}');
+                        if (!match) match = opts.find(o => o.value.startsWith('{month_str[:3]}') || o.text.startsWith('{month_str[:3]}'));
+                        if (match) {{
+                            sel.value = match.value;
+                        }} else {{
+                            sel.value = '{month_str}';
+                        }}
+                        try {{
+                            __doPostBack('{MONTH_NAME}', '');
+                            return 'doPostBack: month=' + sel.value;
+                        }} catch(e) {{
+                            return 'doPostBack error: ' + e.message;
+                        }}
+                    }}
+                """)
+                self.logger.info(f"Harris: month → {month_res}")
+                page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(3000)
+
+                body = page.inner_text('body')
+                self.logger.info(f"Harris body: {body[:600]}")
+
+                content = page.content()
+                browser.close()
+
+            # ── Parse results ──────────────────────────────────────────────
+            soup = BeautifulSoup(content, 'lxml')
+            rows = self._parse_results_table(soup)
             self.logger.info(f"Harris: {len(rows)} rows for {month_str} {year_str}")
             for r in rows[:3]:
-                self.logger.info(f"Harris: sample row: {r}")
+                self.logger.info(f"Harris: sample: {r}")
 
             for row in rows:
                 if self._norm_date(row.get('file_date', '')) != target_file:
@@ -115,79 +158,19 @@ class HarrisCountyScraper(BaseScraper):
         self.logger.info(f"Harris: {len(records)} records for {target_date}")
         return records
 
-    # ── Form handling ─────────────────────────────────────────────────────────
-
-    def _parse_form(self, html: str) -> Tuple[BeautifulSoup, dict]:
-        soup = BeautifulSoup(html, 'lxml')
-        data = {}
-        for inp in soup.find_all('input'):
-            name  = inp.get('name', '')
-            value = inp.get('value', '')
-            if name:
-                data[name] = value
-        for sel in soup.find_all('select'):
-            name = sel.get('name', '')
-            if name:
-                selected = sel.find('option', selected=True)
-                data[name] = selected['value'] if selected and selected.get('value') else ''
-        return soup, data
-
-    def _extract_html(self, raw: str) -> str:
-        """
-        Handle both full HTML responses and ASP.NET UpdatePanel partial-update responses.
-        UpdatePanel format: length|type|id|content| (starts with a digit)
-        """
-        stripped = raw.strip()
-
-        # If it looks like HTML, return as-is
-        if stripped.startswith('<') or stripped.startswith('<!'):
-            return raw
-
-        # Otherwise attempt UpdatePanel parsing
-        # Format: len|type|id|content| for each segment
-        best = ''
-        i = 0
-        while i < len(raw):
-            pipe1 = raw.find('|', i)
-            if pipe1 == -1:
-                break
-            length_str = raw[i:pipe1]
-            try:
-                length = int(length_str)
-            except ValueError:
-                break
-            pipe2 = raw.find('|', pipe1 + 1)
-            if pipe2 == -1:
-                break
-            block_type = raw[pipe1 + 1:pipe2]
-            pipe3 = raw.find('|', pipe2 + 1)
-            if pipe3 == -1:
-                break
-            content_start = pipe3 + 1
-            content = raw[content_start:content_start + length]
-            if block_type in ('updatePanel', 'pageContent') and len(content) > len(best):
-                best = content
-            i = content_start + length + 1  # skip trailing |
-            if i >= len(raw):
-                break
-
-        self.logger.info(f"Harris: _extract_html: format={'updatePanel' if best else 'fullHTML'}, extracted={len(best or raw)} chars")
-        return best if best else raw
-
     # ── Results table ─────────────────────────────────────────────────────────
 
     def _parse_results_table(self, soup: BeautifulSoup) -> List[Dict]:
-        rows = []
-        # Try ID patterns first
+        rows  = []
+        # Try named table first
         table = (
             soup.find('table', id=re.compile(r'grd|grid|result|foreclos|frcl', re.I))
             or soup.find('table', class_=re.compile(r'grd|grid|result|data', re.I))
         )
-        # Fallback: any table with a date AND a link
+        # Fallback: table with date + link
         if not table:
             for t in soup.find_all('table'):
-                text = t.get_text()
-                if re.search(r'\d{1,2}/\d{1,2}/\d{4}', text) and t.find('a'):
+                if re.search(r'\d{1,2}/\d{1,2}/\d{4}', t.get_text()) and t.find('a'):
                     table = t
                     break
         # Last resort: any table with 3+ columns
@@ -196,7 +179,6 @@ class HarrisCountyScraper(BaseScraper):
                 trs = t.find_all('tr')
                 if trs and len(trs[0].find_all(['th', 'td'])) >= 3:
                     table = t
-                    self.logger.info("Harris: using last-resort table")
                     break
 
         if not table:
@@ -246,8 +228,6 @@ class HarrisCountyScraper(BaseScraper):
             zip_code = m2.group(3)
         return {'first_name': first, 'last_name': last,
                 'address': address, 'city': city, 'state': 'TX', 'zip_code': zip_code}
-
-    # ── Utilities ─────────────────────────────────────────────────────────────
 
     @staticmethod
     def _norm_date(d: str) -> str:
