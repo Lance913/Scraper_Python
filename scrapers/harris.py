@@ -2,21 +2,19 @@
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
 
-The portal is JavaScript-rendered — HTTP POST returns an HTML shell with
-no results table. Playwright must execute the JavaScript.
-
-Telerik RadComboBox fix: call __doPostBack() directly instead of
-fighting Telerik's UI. __doPostBack is ASP.NET WebForms' native form
-submission function. It sets __EVENTTARGET and calls form.submit().
-This bypasses Telerik's client-side event system entirely.
+Telerik RadComboBox stores selection in a hidden *_ClientState JSON field,
+not in the native <select> value.  We set BOTH the native value AND the
+ClientState, then click the "Search" submit button (btnSearch) to load
+the results table.
 
 Flow:
-  1. Playwright loads page
-  2. JS: read option values from month <select>
-  3. JS: sel.value = year → __doPostBack('...ddlYear', '') → page reloads
-  4. JS: sel.value = month → __doPostBack('...ddlMonth', '') → results load
-  5. Parse results table (Doc ID / Sale Date / File Date)
-  6. Filter to target_date, fetch detail for name/address
+  1. Load page
+  2. Log all hidden inputs so we can see ClientState field names
+  3. Set year native select + ClientState + dispatch change
+  4. Wait for month dropdown to repopulate (networkidle)
+  5. Set month native select + ClientState + dispatch change
+  6. Click btnSearch → results load
+  7. Parse results table (Doc ID / Sale Date / File Date)
 """
 
 import re
@@ -26,17 +24,30 @@ from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from .base import BaseScraper
 
-SEARCH_URL = "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx"
-BASE_URL   = "https://www.cclerk.hctx.net"
+SEARCH_URL  = "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx"
+BASE_URL    = "https://www.cclerk.hctx.net"
+YEAR_NAME   = 'ctl00$ContentPlaceHolder1$ddlYear'
+MONTH_NAME  = 'ctl00$ContentPlaceHolder1$ddlMonth'
+SEARCH_NAME = 'ctl00$ContentPlaceHolder1$btnSearch'
 
-YEAR_NAME  = 'ctl00$ContentPlaceHolder1$ddlYear'
-MONTH_NAME = 'ctl00$ContentPlaceHolder1$ddlMonth'
+# Telerik ClientState field names (underscores, not dollar signs)
+YEAR_STATE_NAME  = 'ctl00_ContentPlaceHolder1_ddlYear_ClientState'
+MONTH_STATE_NAME = 'ctl00_ContentPlaceHolder1_ddlMonth_ClientState'
 
 MONTH_LABELS = {
     1: 'January', 2: 'February', 3: 'March',    4: 'April',
     5: 'May',     6: 'June',     7: 'July',      8: 'August',
     9: 'September', 10: 'October', 11: 'November', 12: 'December',
 }
+
+
+def _telerik_state(value: str, text: str) -> str:
+    """Build Telerik RadComboBox ClientState JSON."""
+    import json
+    return json.dumps({
+        "logEntries": [], "value": value, "text": text,
+        "enabled": True, "checkedIndices": [], "checkedItemsTextOverflows": False
+    }, separators=(',', ':'))
 
 
 class HarrisCountyScraper(BaseScraper):
@@ -52,10 +63,10 @@ class HarrisCountyScraper(BaseScraper):
             self.logger.error("Playwright not installed")
             return []
 
-        records    = []
-        year_val   = str(target_date.year)          # '2026'
-        month_val  = str(target_date.month)          # '6' for June
-        month_str  = MONTH_LABELS[target_date.month] # 'June' — for logging only
+        records     = []
+        year_val    = str(target_date.year)
+        month_val   = str(target_date.month)
+        month_str   = MONTH_LABELS[target_date.month]
         target_file = f"{target_date.month}/{target_date.day}/{target_date.year}"
 
         try:
@@ -75,56 +86,71 @@ class HarrisCountyScraper(BaseScraper):
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(1000)
 
-                # ── Log month option values (diagnostic) ───────────────────
-                month_opts = page.evaluate(f"""
+                # ── Log ALL hidden inputs so we can see ClientState fields ─
+                all_inputs = page.evaluate("""
+                    () => Array.from(document.querySelectorAll('input'))
+                         .filter(i => i.name)
+                         .map(i => i.name + '|' + i.type)
+                         .join(', ')
+                """)
+                self.logger.info(f"Harris: all inputs: {all_inputs}")
+
+                # ── Year: set native select + ClientState + change event ───
+                year_state = _telerik_state(year_val, year_val)
+                yr = page.evaluate(f"""
                     () => {{
-                        var sel = document.querySelector('select[name="{MONTH_NAME}"]');
-                        if (!sel) return 'month select not found';
-                        return Array.from(sel.options).map(o => o.value + ':' + o.text).join(', ');
+                        // Native select
+                        var sel = document.querySelector('select[name="{YEAR_NAME}"]');
+                        if (sel) sel.value = '{year_val}';
+
+                        // Telerik ClientState
+                        var cs = document.querySelector(
+                            'input[name="{YEAR_STATE_NAME}"], ' +
+                            'input[id="{YEAR_STATE_NAME}"]'
+                        );
+                        if (cs) cs.value = {repr(year_state)};
+
+                        // Fire native change event so ASP.NET picks it up
+                        if (sel) sel.dispatchEvent(new Event('change', {{bubbles:true}}));
+
+                        return 'year: sel=' + (sel ? sel.value : 'none') +
+                               ' cs=' + (cs ? 'found' : 'not found');
                     }}
                 """)
-                self.logger.info(f"Harris: month options: {month_opts}")
+                self.logger.info(f"Harris: year set → {yr}")
+                page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(1500)
 
-                # ── Select year — set form fields then form.submit() ────────
-                # Avoid __doPostBack (fails in Playwright's strict-mode evaluate).
-                # Instead: set __EVENTTARGET + __EVENTARGUMENT, then submit form.
-                # page.expect_navigation() handles the resulting page load.
-                try:
-                    with page.expect_navigation(wait_until='networkidle', timeout=15_000):
-                        page.evaluate(f"""
-                            () => {{
-                                var sel = document.querySelector('select[name="{YEAR_NAME}"]');
-                                if (sel) sel.value = '{year_val}';
-                                var et = document.querySelector('input[name="__EVENTTARGET"]');
-                                var ea = document.querySelector('input[name="__EVENTARGUMENT"]');
-                                if (et) et.value = '{YEAR_NAME}';
-                                if (ea) ea.value = '';
-                                document.forms[0].submit();
-                            }}
-                        """)
-                    self.logger.info(f"Harris: year={year_val} submitted")
-                except Exception as e:
-                    self.logger.warning(f"Harris: year submit: {e}")
-                page.wait_for_timeout(1000)
+                # ── Month: set native select + ClientState + change event ──
+                month_state = _telerik_state(month_val, month_str)
+                mo = page.evaluate(f"""
+                    () => {{
+                        var sel = document.querySelector('select[name="{MONTH_NAME}"]');
+                        if (sel) sel.value = '{month_val}';
 
-                # ── Select month ────────────────────────────────────────────
+                        var cs = document.querySelector(
+                            'input[name="{MONTH_STATE_NAME}"], ' +
+                            'input[id="{MONTH_STATE_NAME}"]'
+                        );
+                        if (cs) cs.value = {repr(month_state)};
+
+                        if (sel) sel.dispatchEvent(new Event('change', {{bubbles:true}}));
+
+                        return 'month: sel=' + (sel ? sel.value : 'none') +
+                               ' cs=' + (cs ? 'found' : 'not found');
+                    }}
+                """)
+                self.logger.info(f"Harris: month set → {mo}")
+                page.wait_for_timeout(500)
+
+                # ── Click Search button ────────────────────────────────────
                 try:
-                    with page.expect_navigation(wait_until='networkidle', timeout=15_000):
-                        page.evaluate(f"""
-                            () => {{
-                                var sel = document.querySelector('select[name="{MONTH_NAME}"]');
-                                if (sel) sel.value = '{month_val}';
-                                var et = document.querySelector('input[name="__EVENTTARGET"]');
-                                var ea = document.querySelector('input[name="__EVENTARGUMENT"]');
-                                if (et) et.value = '{MONTH_NAME}';
-                                if (ea) ea.value = '';
-                                document.forms[0].submit();
-                            }}
-                        """)
-                    self.logger.info(f"Harris: month={month_val} ({month_str}) submitted")
+                    with page.expect_navigation(wait_until='networkidle', timeout=20_000):
+                        page.click(f'input[name="{SEARCH_NAME}"], button[name="{SEARCH_NAME}"]')
+                    self.logger.info("Harris: Search button clicked")
                 except Exception as e:
-                    self.logger.warning(f"Harris: month submit: {e}")
-                page.wait_for_timeout(2000)
+                    self.logger.warning(f"Harris: Search click: {e}")
+                page.wait_for_timeout(4000)
 
                 body = page.inner_text('body')
                 self.logger.info(f"Harris body: {body[:600]}")
@@ -143,10 +169,7 @@ class HarrisCountyScraper(BaseScraper):
                 if self._norm_date(row.get('file_date', '')) != target_file:
                     continue
                 detail = self._fetch_detail(row.get('detail_url', ''))
-                detail.update({
-                    'file_date': row['file_date'],
-                    'sale_date': row.get('sale_date', ''),
-                })
+                detail.update({'file_date': row['file_date'], 'sale_date': row.get('sale_date', '')})
                 records.append(self.build_record(**detail))
                 time.sleep(0.3)
 
@@ -160,25 +183,21 @@ class HarrisCountyScraper(BaseScraper):
 
     def _parse_results_table(self, soup: BeautifulSoup) -> List[Dict]:
         rows  = []
-        # Try named table first
         table = (
             soup.find('table', id=re.compile(r'grd|grid|result|foreclos|frcl', re.I))
             or soup.find('table', class_=re.compile(r'grd|grid|result|data', re.I))
         )
-        # Fallback: table with date + link
         if not table:
             for t in soup.find_all('table'):
                 if re.search(r'\d{1,2}/\d{1,2}/\d{4}', t.get_text()) and t.find('a'):
                     table = t
                     break
-        # Last resort: any table with 3+ columns
         if not table:
             for t in soup.find_all('table'):
                 trs = t.find_all('tr')
                 if trs and len(trs[0].find_all(['th', 'td'])) >= 3:
                     table = t
                     break
-
         if not table:
             self.logger.warning("Harris: no results table found")
             return rows
