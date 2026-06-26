@@ -1,12 +1,16 @@
 """
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
+
+The page uses ASP.NET WebForms with Telerik RadComboBox dropdowns.
+Year/month list items exist in the DOM but are CSS-hidden inside the dropdown.
+We use JavaScript .click() to bypass CSS visibility and trigger the postback.
 """
 
 import re
 import time
 from datetime import date
-from typing import List, Dict, Optional
+from typing import List, Dict
 from bs4 import BeautifulSoup
 from .base import BaseScraper
 
@@ -48,69 +52,43 @@ class HarrisCountyScraper(BaseScraper):
                 page.goto(SEARCH_URL)
                 page.wait_for_load_state('networkidle')
 
-                # Debug: log all visible text to find element names
-                body_text = page.inner_text('body')
-                self.logger.info(f"Harris page text sample: {body_text[:500]}")
+                # ── Click year via JavaScript (bypasses CSS hidden state) ──
+                clicked_year = page.evaluate(f"""
+                    () => {{
+                        const all = document.querySelectorAll('a, li, span, div');
+                        for (const el of all) {{
+                            if (el.textContent.trim() === '{year_str}') {{
+                                el.click();
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    }}
+                """)
+                self.logger.info(f"Harris: JS year click result: {clicked_year}")
+                page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(2000)
 
-                # ── Click year ─────────────────────────────────────────────
-                # Try multiple selector patterns
-                year_clicked = False
-                for sel in [
-                    f"text={year_str}",
-                    f"a:text-is('{year_str}')",
-                    f"li:text-is('{year_str}')",
-                    f"span:text-is('{year_str}')",
-                    f"[id*='Year']:has-text('{year_str}')",
-                ]:
-                    el = page.query_selector(sel)
-                    if el:
-                        el.click()
-                        page.wait_for_load_state('networkidle')
-                        page.wait_for_timeout(1500)
-                        self.logger.info(f"Harris: clicked year via '{sel}'")
-                        year_clicked = True
-                        break
+                # ── Click month via JavaScript ─────────────────────────────
+                clicked_month = page.evaluate(f"""
+                    () => {{
+                        const all = document.querySelectorAll('a, li, span, div');
+                        for (const el of all) {{
+                            if (el.textContent.trim() === '{month_str}') {{
+                                el.click();
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    }}
+                """)
+                self.logger.info(f"Harris: JS month click result: {clicked_month}")
+                page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(2000)
 
-                if not year_clicked:
-                    self.logger.warning(f"Harris: could not click year {year_str}")
-
-                # Debug: log page text after year click
-                body_text2 = page.inner_text('body')
-                self.logger.info(f"Harris page after year click: {body_text2[:500]}")
-
-                # ── Click month ────────────────────────────────────────────
-                month_clicked = False
-                for sel in [
-                    f"text={month_str}",
-                    f"a:text-is('{month_str}')",
-                    f"li:text-is('{month_str}')",
-                    f"span:text-is('{month_str}')",
-                    f"[id*='Month']:has-text('{month_str}')",
-                    # Try selecting if it's a <select> dropdown
-                ]:
-                    el = page.query_selector(sel)
-                    if el:
-                        el.click()
-                        page.wait_for_load_state('networkidle')
-                        page.wait_for_timeout(1500)
-                        self.logger.info(f"Harris: clicked month via '{sel}'")
-                        month_clicked = True
-                        break
-
-                # Fallback: try <select> dropdown for month
-                if not month_clicked:
-                    for sel_id in ['select', '[id*="Month"]', '[id*="month"]']:
-                        try:
-                            page.select_option(sel_id, label=month_str)
-                            page.wait_for_load_state('networkidle')
-                            self.logger.info(f"Harris: selected month via select_option '{sel_id}'")
-                            month_clicked = True
-                            break
-                        except Exception:
-                            pass
-
-                if not month_clicked:
-                    self.logger.warning(f"Harris: could not click month {month_str}")
+                # ── Log body to confirm results loaded ─────────────────────
+                body = page.inner_text('body')
+                self.logger.info(f"Harris body after month select (first 600): {body[:600]}")
 
                 content = page.content()
                 browser.close()
@@ -138,8 +116,6 @@ class HarrisCountyScraper(BaseScraper):
         self.logger.info(f"Harris: {len(records)} records for {target_date}")
         return records
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
     def _parse_results_table(self, soup: BeautifulSoup) -> List[Dict]:
         rows  = []
         table = (
@@ -148,7 +124,7 @@ class HarrisCountyScraper(BaseScraper):
             or soup.find('table')
         )
         if not table:
-            self.logger.warning("Harris: no results table found in HTML")
+            self.logger.warning("Harris: no results table in HTML")
             return rows
 
         for tr in table.find_all('tr')[1:]:
@@ -174,7 +150,7 @@ class HarrisCountyScraper(BaseScraper):
         resp = self.get(url)
         if not resp:
             return {}
-        text   = BeautifulSoup(resp.text, 'lxml').get_text(' ', strip=True)
+        text  = BeautifulSoup(resp.text, 'lxml').get_text(' ', strip=True)
         first, last = '', ''
         m = re.search(r'Grantor[:\s]+([A-Z][A-Z\s,\.]+?)(?:Grantee|Trustee|Said|Dated)', text, re.I)
         if m:
