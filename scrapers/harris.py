@@ -1,12 +1,6 @@
 """
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
-
-Uses Playwright to:
-  1. Navigate to the portal
-  2. Click the current year then current month
-  3. Extract the results table
-  4. Fetch each document detail page for name + address
 """
 
 import re
@@ -33,18 +27,16 @@ class HarrisCountyScraper(BaseScraper):
 
     def scrape(self, target_date: date) -> List[Dict]:
         self.logger.info(f"Scraping Harris County for {target_date}")
-
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            self.logger.error("Playwright not installed. Run: pip install playwright && playwright install chromium")
+            self.logger.error("Playwright not installed.")
             return []
 
-        records = []
-        year_str  = str(target_date.year)
-        month_str = MONTH_NAMES[target_date.month]
-        # Target file-date string as shown on the portal (M/D/YYYY, no leading zeros)
-        target_file_str = f"{target_date.month}/{target_date.day}/{target_date.year}"
+        records     = []
+        year_str    = str(target_date.year)
+        month_str   = MONTH_NAMES[target_date.month]
+        target_file = f"{target_date.month}/{target_date.day}/{target_date.year}"
 
         try:
             with sync_playwright() as pw:
@@ -56,56 +48,89 @@ class HarrisCountyScraper(BaseScraper):
                 page.goto(SEARCH_URL)
                 page.wait_for_load_state('networkidle')
 
-                # ── Select year ────────────────────────────────────────────
-                # The year list renders as <li> or <a> elements
-                year_sel = (
-                    f"li:has-text('{year_str}'), "
-                    f"a:has-text('{year_str}'), "
-                    f"span:has-text('{year_str}')"
-                )
-                year_el = page.query_selector(year_sel)
-                if year_el:
-                    year_el.click()
-                    page.wait_for_load_state('networkidle')
-                    self.logger.info(f"Harris: selected year {year_str}")
-                else:
-                    self.logger.warning(f"Harris: could not find year {year_str} element")
+                # Debug: log all visible text to find element names
+                body_text = page.inner_text('body')
+                self.logger.info(f"Harris page text sample: {body_text[:500]}")
 
-                # ── Select month ───────────────────────────────────────────
-                month_sel = (
-                    f"li:has-text('{month_str}'), "
-                    f"a:has-text('{month_str}'), "
-                    f"span:has-text('{month_str}')"
-                )
-                month_el = page.query_selector(month_sel)
-                if month_el:
-                    month_el.click()
-                    page.wait_for_load_state('networkidle')
-                    self.logger.info(f"Harris: selected month {month_str}")
-                else:
-                    self.logger.warning(f"Harris: could not find month {month_str} element")
+                # ── Click year ─────────────────────────────────────────────
+                # Try multiple selector patterns
+                year_clicked = False
+                for sel in [
+                    f"text={year_str}",
+                    f"a:text-is('{year_str}')",
+                    f"li:text-is('{year_str}')",
+                    f"span:text-is('{year_str}')",
+                    f"[id*='Year']:has-text('{year_str}')",
+                ]:
+                    el = page.query_selector(sel)
+                    if el:
+                        el.click()
+                        page.wait_for_load_state('networkidle')
+                        page.wait_for_timeout(1500)
+                        self.logger.info(f"Harris: clicked year via '{sel}'")
+                        year_clicked = True
+                        break
 
-                # ── Parse the results table ────────────────────────────────
+                if not year_clicked:
+                    self.logger.warning(f"Harris: could not click year {year_str}")
+
+                # Debug: log page text after year click
+                body_text2 = page.inner_text('body')
+                self.logger.info(f"Harris page after year click: {body_text2[:500]}")
+
+                # ── Click month ────────────────────────────────────────────
+                month_clicked = False
+                for sel in [
+                    f"text={month_str}",
+                    f"a:text-is('{month_str}')",
+                    f"li:text-is('{month_str}')",
+                    f"span:text-is('{month_str}')",
+                    f"[id*='Month']:has-text('{month_str}')",
+                    # Try selecting if it's a <select> dropdown
+                ]:
+                    el = page.query_selector(sel)
+                    if el:
+                        el.click()
+                        page.wait_for_load_state('networkidle')
+                        page.wait_for_timeout(1500)
+                        self.logger.info(f"Harris: clicked month via '{sel}'")
+                        month_clicked = True
+                        break
+
+                # Fallback: try <select> dropdown for month
+                if not month_clicked:
+                    for sel_id in ['select', '[id*="Month"]', '[id*="month"]']:
+                        try:
+                            page.select_option(sel_id, label=month_str)
+                            page.wait_for_load_state('networkidle')
+                            self.logger.info(f"Harris: selected month via select_option '{sel_id}'")
+                            month_clicked = True
+                            break
+                        except Exception:
+                            pass
+
+                if not month_clicked:
+                    self.logger.warning(f"Harris: could not click month {month_str}")
+
                 content = page.content()
                 browser.close()
 
-            soup  = BeautifulSoup(content, 'lxml')
-            rows  = self._parse_results_table(soup)
+            # ── Parse results ──────────────────────────────────────────────
+            soup = BeautifulSoup(content, 'lxml')
+            rows = self._parse_results_table(soup)
             self.logger.info(f"Harris: {len(rows)} rows found for {month_str} {year_str}")
 
-            # Filter to today's file date only
             for row in rows:
-                if row.get('file_date') != target_file_str:
+                if row.get('file_date') != target_file:
                     continue
                 detail = self._fetch_detail(row.get('detail_url', ''))
-                if detail:
-                    detail.update({
-                        'county':    self.county,
-                        'file_date': row['file_date'],
-                        'sale_date': row.get('sale_date', ''),
-                    })
-                    records.append(self.build_record(**detail))
-                time.sleep(0.5)
+                detail.update({
+                    'county':    self.county,
+                    'file_date': row['file_date'],
+                    'sale_date': row.get('sale_date', ''),
+                })
+                records.append(self.build_record(**detail))
+                time.sleep(0.4)
 
         except Exception as exc:
             self.logger.error(f"Harris scraper error: {exc}", exc_info=True)
@@ -116,33 +141,29 @@ class HarrisCountyScraper(BaseScraper):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _parse_results_table(self, soup: BeautifulSoup) -> List[Dict]:
-        rows = []
-        # Harris renders a GridView table — try several selectors
+        rows  = []
         table = (
             soup.find('table', id=re.compile(r'grd|grid|result', re.I))
             or soup.find('table', class_=re.compile(r'grd|grid|result', re.I))
             or soup.find('table')
         )
         if not table:
+            self.logger.warning("Harris: no results table found in HTML")
             return rows
 
         for tr in table.find_all('tr')[1:]:
             tds = tr.find_all('td')
             if len(tds) < 3:
                 continue
-
             link_tag   = tds[0].find('a')
-            sale_date  = tds[1].get_text(strip=True)
-            file_date  = tds[2].get_text(strip=True)
             detail_url = ''
             if link_tag and link_tag.get('href'):
                 href = link_tag['href']
                 detail_url = href if href.startswith('http') else BASE_URL + href
-
             rows.append({
                 'doc_id':     tds[0].get_text(strip=True),
-                'sale_date':  sale_date,
-                'file_date':  file_date,
+                'sale_date':  tds[1].get_text(strip=True),
+                'file_date':  tds[2].get_text(strip=True),
                 'detail_url': detail_url,
             })
         return rows
@@ -153,21 +174,14 @@ class HarrisCountyScraper(BaseScraper):
         resp = self.get(url)
         if not resp:
             return {}
-
-        text = BeautifulSoup(resp.text, 'lxml').get_text(' ', strip=True)
-
+        text   = BeautifulSoup(resp.text, 'lxml').get_text(' ', strip=True)
         first, last = '', ''
-        m = re.search(
-            r'Grantor[:\s]+([A-Z][A-Z\s,\.]+?)(?:Grantee|Trustee|Said|Dated|$)',
-            text, re.I
-        )
+        m = re.search(r'Grantor[:\s]+([A-Z][A-Z\s,\.]+?)(?:Grantee|Trustee|Said|Dated)', text, re.I)
         if m:
             first, last = self.parse_name(m.group(1))
-
         address, city, zip_code = '', '', ''
         m2 = re.search(
-            r'(\d+\s+[A-Z0-9][A-Z0-9\s]+?'
-            r'(?:ST|AVE|DR|RD|LN|BLVD|CT|WAY|PL|CIR|TRAIL|PKWY)[A-Z\s\.]*?)'
+            r'(\d+\s+[A-Z0-9][A-Z0-9\s]+?(?:ST|AVE|DR|RD|LN|BLVD|CT|WAY|PL|CIR|TRAIL|PKWY)[A-Z\s\.]*?)'
             r',?\s+([A-Z][A-Z\s]+?),?\s+TX\s*(\d{5})',
             text, re.I
         )
@@ -175,12 +189,5 @@ class HarrisCountyScraper(BaseScraper):
             address  = m2.group(1).strip().title()
             city     = m2.group(2).strip().title()
             zip_code = m2.group(3)
-
-        return {
-            'first_name': first,
-            'last_name':  last,
-            'address':    address,
-            'city':       city,
-            'state':      'TX',
-            'zip_code':   zip_code,
-        }
+        return {'first_name': first, 'last_name': last,
+                'address': address, 'city': city, 'state': 'TX', 'zip_code': zip_code}

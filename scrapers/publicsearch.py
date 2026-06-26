@@ -1,15 +1,11 @@
 """
 PublicSearch.us Scraper — Bexar, Dallas, Tarrant
 
-These three counties all use Tyler Technologies publicsearch.us, which is a
-React Single Page Application.  Data is loaded via JavaScript API calls.
-
 Strategy:
-  1. Launch headless Chromium via Playwright
-  2. Intercept every JSON API response the React app makes internally
-  3. Find the response that contains instrument/foreclosure records
-  4. Parse names and addresses from those records
-  5. Falls back to REST GET if Playwright not available
+  1. Navigate to the portal with date params in the URL hash
+  2. Intercept ALL JSON API responses (log them all for debugging)
+  3. Also interact with the search form directly
+  4. Extract data from rendered DOM table as a fallback
 """
 
 import json
@@ -29,45 +25,35 @@ class PublicSearchScraper(BaseScraper):
         self.base_url  = f"https://{county_slug}.tx.publicsearch.us"
         self.doc_types = doc_types or ['NTS']
 
-    # ── Entry point ───────────────────────────────────────────────────────────
-
     def scrape(self, target_date: date) -> List[Dict]:
         self.logger.info(f"Scraping {self.county} County for {target_date}")
         date_str = target_date.strftime('%Y-%m-%d')
-
-        # Primary: Playwright (intercepts real API calls)
-        records = self._playwright_scrape(date_str)
-        if records is not None:
-            self.logger.info(f"{self.county}: {len(records)} records")
-            return records
-
-        # Fallback: try REST API directly
-        records = self._rest_api(date_str)
-        self.logger.info(f"{self.county}: {len(records)} records (via REST fallback)")
+        records  = self._playwright_scrape(date_str)
+        if records is None:
+            records = self._rest_api(date_str)
+        self.logger.info(f"{self.county}: {len(records)} records")
         return records
 
-    # ── Playwright scraper ────────────────────────────────────────────────────
+    # ── Playwright ────────────────────────────────────────────────────────────
 
     def _playwright_scrape(self, date_str: str) -> Optional[List[Dict]]:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            self.logger.warning("Playwright not installed — skipping Playwright scrape")
             return None
 
-        captured = []   # intercepted JSON responses
+        captured_json = []   # every JSON response, for debug
 
         def on_response(response):
             try:
+                if response.status != 200:
+                    return
                 ct = response.headers.get('content-type', '')
                 if 'json' not in ct:
                     return
-                if response.status != 200:
-                    return
                 data = response.json()
-                # Only keep responses that look like instrument search results
-                if self._looks_like_results(data):
-                    captured.append(data)
+                self.logger.info(f"{self.county}: captured JSON from {response.url} — keys: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}")
+                captured_json.append({'url': response.url, 'data': data})
             except Exception:
                 pass
 
@@ -85,84 +71,88 @@ class PublicSearchScraper(BaseScraper):
                 page.on('response', on_response)
                 page.set_default_timeout(30_000)
 
-                self.logger.info(f"{self.county}: loading portal...")
-                page.goto(self.base_url)
+                # ── Approach 1: direct URL with search params ──────────────
+                search_url = (
+                    f"{self.base_url}/#/"
+                    f"?searchType=Quick"
+                    f"&dateRangeType=Filing"
+                    f"&startDate={date_str}"
+                    f"&endDate={date_str}"
+                )
+                self.logger.info(f"{self.county}: loading {search_url}")
+                page.goto(search_url)
                 page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(3000)
 
-                # ── Try to apply date filter ───────────────────────────────
-                self._apply_date_filter(page, date_str)
+                # ── Approach 2: interact with search form ──────────────────
+                self._fill_and_submit(page, date_str)
 
-                # ── Also try the search API directly from within page ──────
-                self._trigger_api_search(page, date_str)
+                # ── Approach 3: inject fetch calls ─────────────────────────
+                self._inject_api_calls(page, date_str)
+                page.wait_for_timeout(3000)
 
-                page.wait_for_load_state('networkidle')
+                # Grab rendered HTML for DOM-based fallback
+                html_content = page.content()
+                body_text    = page.inner_text('body')
+                self.logger.info(f"{self.county} body sample: {body_text[:600]}")
+
                 browser.close()
 
-            # Parse all captured API responses
+            # ── Parse captured API responses ───────────────────────────────
             records = []
-            for data in captured:
-                records.extend(self._parse_results(data, date_str))
+            for entry in captured_json:
+                records.extend(self._parse_json(entry['data'], date_str))
 
-            # Deduplicate by address
-            seen = set()
-            deduped = []
-            for r in records:
-                key = r.get('address', '').lower().strip()
-                if key and key not in seen:
-                    seen.add(key)
-                    deduped.append(r)
+            # ── DOM fallback ───────────────────────────────────────────────
+            if not records:
+                self.logger.info(f"{self.county}: no API records, trying DOM extraction")
+                records = self._parse_dom(html_content, date_str)
 
-            return deduped
+            return records
 
         except Exception as exc:
             self.logger.error(f"{self.county}: Playwright error: {exc}", exc_info=True)
             return None
 
-    def _apply_date_filter(self, page, date_str: str):
-        """Try to fill date fields and submit search on the portal."""
+    def _fill_and_submit(self, page, date_str: str):
+        """Try to fill date inputs and click Search."""
         try:
-            # Common patterns for date inputs on publicsearch.us
-            selectors = [
-                ('input[placeholder*="Start" i]', 'input[placeholder*="End" i]'),
-                ('input[id*="start" i]',           'input[id*="end" i]'),
-                ('input[name*="start" i]',          'input[name*="end" i]'),
-                ('input[aria-label*="start" i]',    'input[aria-label*="end" i]'),
+            # Date input selectors (Tyler Tech portal patterns)
+            date_pairs = [
+                ('input[placeholder*="Start" i]',     'input[placeholder*="End" i]'),
+                ('input[id*="startDate" i]',           'input[id*="endDate" i]'),
+                ('input[aria-label*="Start Date" i]',  'input[aria-label*="End Date" i]'),
+                ('input[name*="start" i]',              'input[name*="end" i]'),
             ]
-
-            for start_sel, end_sel in selectors:
+            for start_sel, end_sel in date_pairs:
                 start_el = page.query_selector(start_sel)
                 end_el   = page.query_selector(end_sel)
                 if start_el and end_el:
                     start_el.triple_click()
-                    start_el.type(date_str)
+                    start_el.fill(date_str)
                     end_el.triple_click()
-                    end_el.type(date_str)
+                    end_el.fill(date_str)
+                    self.logger.info(f"{self.county}: filled date fields")
 
-                    # Try to click Search button
-                    btn = page.query_selector('button[type="submit"]') or \
-                          page.query_selector('button:has-text("Search")')
+                    # Submit
+                    btn = (page.query_selector('button[type="submit"]')
+                           or page.query_selector('button:has-text("Search")'))
                     if btn:
                         btn.click()
-                        page.wait_for_load_state('networkidle', timeout=10_000)
+                        page.wait_for_load_state('networkidle')
+                        page.wait_for_timeout(2000)
                     return
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.debug(f"{self.county}: form fill error: {e}")
 
-    def _trigger_api_search(self, page, date_str: str):
-        """
-        Inject a fetch() call into the page to hit the API endpoint directly.
-        This is a reliable trick for React SPAs — the page already has auth
-        cookies/tokens in its context, so the API call succeeds.
-        """
+    def _inject_api_calls(self, page, date_str: str):
+        """Inject fetch() into the page to hit API endpoints."""
         for doc_type in self.doc_types:
             script = f"""
             (async () => {{
-                const endpoints = [
-                    '/api/instruments',
-                    '/api/search',
-                    '/api/instruments/search',
-                ];
-                const payload = {{
+                const base = window.location.origin;
+                const paths = ['/api/instruments', '/api/search', '/results'];
+                const body = {{
                     searchType: 'Quick',
                     dateRangeType: 'Filing',
                     startDate: '{date_str}',
@@ -171,16 +161,16 @@ class PublicSearchScraper(BaseScraper):
                     page: 0,
                     pageSize: 200,
                 }};
-                for (const ep of endpoints) {{
+                for (const p of paths) {{
                     try {{
                         // GET
-                        const qs = new URLSearchParams(payload).toString();
-                        await fetch(ep + '?' + qs, {{credentials: 'include'}});
+                        const qs = new URLSearchParams(body).toString();
+                        await fetch(base + p + '?' + qs, {{credentials: 'include'}});
                         // POST
-                        await fetch(ep, {{
+                        await fetch(base + p, {{
                             method: 'POST',
                             headers: {{'Content-Type': 'application/json'}},
-                            body: JSON.stringify(payload),
+                            body: JSON.stringify(body),
                             credentials: 'include',
                         }});
                     }} catch(e) {{}}
@@ -189,78 +179,61 @@ class PublicSearchScraper(BaseScraper):
             """
             try:
                 page.evaluate(script)
-                page.wait_for_load_state('networkidle', timeout=8_000)
+                page.wait_for_timeout(2000)
             except Exception:
                 pass
 
-    # ── REST fallback (no browser) ────────────────────────────────────────────
+    # ── REST API fallback ─────────────────────────────────────────────────────
 
     def _rest_api(self, date_str: str) -> List[Dict]:
-        self.session.headers.update({
-            'Accept':       'application/json',
-            'Content-Type': 'application/json',
-            'Referer':      self.base_url + '/',
-            'Origin':       self.base_url,
-        })
-
         params = {
             'searchType':    'Quick',
             'dateRangeType': 'Filing',
             'startDate':     date_str,
             'endDate':       date_str,
-            'docType':       ','.join(self.doc_types),
+            'docType':       'NTS',
             'page':          '0',
             'pageSize':      '200',
         }
-
-        for endpoint in ['/api/instruments', '/api/search', '/api/instruments/search']:
-            resp = self.get(self.base_url + endpoint, params=params)
+        self.session.headers.update({'Accept': 'application/json'})
+        for ep in ['/api/instruments', '/api/search']:
+            resp = self.get(self.base_url + ep, params=params)
             if not resp:
                 continue
             try:
-                data = resp.json()
-                records = self._parse_results(data, date_str)
+                data    = resp.json()
+                records = self._parse_json(data, date_str)
                 if records:
                     return records
             except Exception:
-                continue
-
+                pass
         return []
 
     # ── Parsers ───────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _looks_like_results(data) -> bool:
-        """Return True if a JSON blob looks like instrument search results."""
-        if isinstance(data, list) and data:
-            first = data[0]
-            if isinstance(first, dict):
-                return any(k in first for k in ('grantor', 'grantors', 'siteAddress', 'instrumentNumber', 'fileDate'))
-        if isinstance(data, dict):
-            return any(k in data for k in ('results', 'instruments', 'data', 'total'))
-        return False
-
-    def _parse_results(self, data, date_str: str) -> List[Dict]:
+    def _parse_json(self, data, date_str: str) -> List[Dict]:
+        """Parse a JSON blob that might be instrument search results."""
         items = (
             data.get('results')
             or data.get('instruments')
             or data.get('data')
+            or data.get('items')
             or (data if isinstance(data, list) else [])
         )
-        if not isinstance(items, list):
+        if not isinstance(items, list) or not items:
             return []
 
         records = []
         for item in items:
             if not isinstance(item, dict):
                 continue
-            rec = self._parse_item(item, date_str)
+            rec = self._item_to_record(item, date_str)
             if rec:
                 records.append(rec)
         return records
 
-    def _parse_item(self, item: Dict, date_str: str) -> Optional[Dict]:
-        # --- Name ---
+    def _item_to_record(self, item: Dict, date_str: str) -> Optional[Dict]:
+        # Name
         raw_name = ''
         grantors = item.get('grantors') or item.get('grantor') or []
         if isinstance(grantors, list) and grantors:
@@ -271,16 +244,14 @@ class PublicSearchScraper(BaseScraper):
         raw_name = raw_name or item.get('grantorName', '') or ''
         first, last = self.parse_name(raw_name) if raw_name else ('', '')
 
-        # --- Address ---
+        # Address
         raw_addr = (
-            item.get('siteAddress')
-            or item.get('propertyAddress')
-            or item.get('address')
-            or item.get('legalDescription', '')
+            item.get('siteAddress') or item.get('propertyAddress')
+            or item.get('address') or item.get('legalDescription', '')
         )
         address, city, zip_code = self.parse_address(raw_addr) if raw_addr else ('', '', '')
 
-        # --- Dates ---
+        # Dates
         file_date = self._fmt(
             item.get('fileDate') or item.get('instrumentDate') or item.get('recordingDate') or date_str
         )
@@ -291,6 +262,37 @@ class PublicSearchScraper(BaseScraper):
             address=address, city=city, zip_code=zip_code,
             file_date=file_date, sale_date=sale_date,
         )
+
+    def _parse_dom(self, html: str, date_str: str) -> List[Dict]:
+        """Extract records from rendered page HTML."""
+        soup    = BeautifulSoup(html, 'lxml')
+        records = []
+
+        for table in soup.find_all('table'):
+            hdrs = [th.get_text(strip=True).lower() for th in table.find_all('th')]
+            self.logger.info(f"{self.county}: table headers: {hdrs}")
+
+            for tr in table.find_all('tr')[1:]:
+                cells = [td.get_text(' ', strip=True) for td in tr.find_all('td')]
+                if not any(cells):
+                    continue
+                row = ' '.join(cells)
+
+                # Try to pull address
+                m = re.search(
+                    r'(\d+\s+[A-Z][A-Z0-9\s]+?(?:ST|AVE|DR|RD|LN|BLVD|CT|WAY|PL|CIR|TRAIL|PKWY)[A-Z\s\.]*?)'
+                    r',?\s+([A-Z][A-Z\s]+?),?\s+TX\s*(\d{5})',
+                    row, re.I
+                )
+                if m:
+                    records.append(self.build_record(
+                        address=m.group(1).strip().title(),
+                        city=m.group(2).strip().title(),
+                        zip_code=m.group(3),
+                        file_date=self._fmt(date_str),
+                    ))
+
+        return records
 
     @staticmethod
     def _fmt(raw: str) -> str:
