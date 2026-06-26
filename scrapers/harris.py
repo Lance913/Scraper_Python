@@ -53,8 +53,9 @@ class HarrisCountyScraper(BaseScraper):
             return []
 
         records    = []
-        year_str   = str(target_date.year)
-        month_str  = MONTH_LABELS[target_date.month]
+        year_val   = str(target_date.year)          # '2026'
+        month_val  = str(target_date.month)          # '6' for June
+        month_str  = MONTH_LABELS[target_date.month] # 'June' — for logging only
         target_file = f"{target_date.month}/{target_date.day}/{target_date.year}"
 
         try:
@@ -74,59 +75,56 @@ class HarrisCountyScraper(BaseScraper):
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(1000)
 
-                # ── Log what option values exist for month <select> ────────
+                # ── Log month option values (diagnostic) ───────────────────
                 month_opts = page.evaluate(f"""
                     () => {{
                         var sel = document.querySelector('select[name="{MONTH_NAME}"]');
                         if (!sel) return 'month select not found';
-                        return Array.from(sel.options).map(o => o.value).join(',');
+                        return Array.from(sel.options).map(o => o.value + ':' + o.text).join(', ');
                     }}
                 """)
-                self.logger.info(f"Harris: month option values: {month_opts}")
+                self.logger.info(f"Harris: month options: {month_opts}")
 
-                # ── Select year via __doPostBack ───────────────────────────
-                year_res = page.evaluate(f"""
-                    () => {{
-                        var sel = document.querySelector('select[name="{YEAR_NAME}"]');
-                        if (!sel) return 'year select not found';
-                        sel.value = '{year_str}';
-                        try {{
-                            __doPostBack('{YEAR_NAME}', '');
-                            return 'doPostBack: year=' + sel.value;
-                        }} catch(e) {{
-                            return 'doPostBack error: ' + e.message;
-                        }}
-                    }}
-                """)
-                self.logger.info(f"Harris: year → {year_res}")
-                page.wait_for_load_state('networkidle')
+                # ── Select year — set form fields then form.submit() ────────
+                # Avoid __doPostBack (fails in Playwright's strict-mode evaluate).
+                # Instead: set __EVENTTARGET + __EVENTARGUMENT, then submit form.
+                # page.expect_navigation() handles the resulting page load.
+                try:
+                    with page.expect_navigation(wait_until='networkidle', timeout=15_000):
+                        page.evaluate(f"""
+                            () => {{
+                                var sel = document.querySelector('select[name="{YEAR_NAME}"]');
+                                if (sel) sel.value = '{year_val}';
+                                var et = document.querySelector('input[name="__EVENTTARGET"]');
+                                var ea = document.querySelector('input[name="__EVENTARGUMENT"]');
+                                if (et) et.value = '{YEAR_NAME}';
+                                if (ea) ea.value = '';
+                                document.forms[0].submit();
+                            }}
+                        """)
+                    self.logger.info(f"Harris: year={year_val} submitted")
+                except Exception as e:
+                    self.logger.warning(f"Harris: year submit: {e}")
+                page.wait_for_timeout(1000)
+
+                # ── Select month ────────────────────────────────────────────
+                try:
+                    with page.expect_navigation(wait_until='networkidle', timeout=15_000):
+                        page.evaluate(f"""
+                            () => {{
+                                var sel = document.querySelector('select[name="{MONTH_NAME}"]');
+                                if (sel) sel.value = '{month_val}';
+                                var et = document.querySelector('input[name="__EVENTTARGET"]');
+                                var ea = document.querySelector('input[name="__EVENTARGUMENT"]');
+                                if (et) et.value = '{MONTH_NAME}';
+                                if (ea) ea.value = '';
+                                document.forms[0].submit();
+                            }}
+                        """)
+                    self.logger.info(f"Harris: month={month_val} ({month_str}) submitted")
+                except Exception as e:
+                    self.logger.warning(f"Harris: month submit: {e}")
                 page.wait_for_timeout(2000)
-
-                # ── Select month via __doPostBack ──────────────────────────
-                month_res = page.evaluate(f"""
-                    () => {{
-                        var sel = document.querySelector('select[name="{MONTH_NAME}"]');
-                        if (!sel) return 'month select not found';
-                        // Try exact match first, then startsWith
-                        var opts = Array.from(sel.options);
-                        var match = opts.find(o => o.value === '{month_str}' || o.text === '{month_str}');
-                        if (!match) match = opts.find(o => o.value.startsWith('{month_str[:3]}') || o.text.startsWith('{month_str[:3]}'));
-                        if (match) {{
-                            sel.value = match.value;
-                        }} else {{
-                            sel.value = '{month_str}';
-                        }}
-                        try {{
-                            __doPostBack('{MONTH_NAME}', '');
-                            return 'doPostBack: month=' + sel.value;
-                        }} catch(e) {{
-                            return 'doPostBack error: ' + e.message;
-                        }}
-                    }}
-                """)
-                self.logger.info(f"Harris: month → {month_res}")
-                page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(3000)
 
                 body = page.inner_text('body')
                 self.logger.info(f"Harris body: {body[:600]}")
@@ -137,7 +135,7 @@ class HarrisCountyScraper(BaseScraper):
             # ── Parse results ──────────────────────────────────────────────
             soup = BeautifulSoup(content, 'lxml')
             rows = self._parse_results_table(soup)
-            self.logger.info(f"Harris: {len(rows)} rows for {month_str} {year_str}")
+            self.logger.info(f"Harris: {len(rows)} rows for {month_str} {year_val}")
             for r in rows[:3]:
                 self.logger.info(f"Harris: sample: {r}")
 
