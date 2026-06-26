@@ -108,7 +108,8 @@ class PublicSearchScraper(BaseScraper):
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(1000)
 
-                page.locator('text=Advanced Search').first.click()
+                # Navigate directly to avoid tooltip-overlay click intercept
+                page.goto(self.base_url + '/search/advanced')
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(1000)
 

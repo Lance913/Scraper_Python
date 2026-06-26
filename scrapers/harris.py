@@ -56,14 +56,8 @@ class HarrisCountyScraper(BaseScraper):
             months_to_scrape.append((target_date.year, target_date.month + 1))
 
         all_records = []
-        seen_keys   = set()
         for year, month in months_to_scrape:
-            rows = self._scrape_month(year, month)
-            for row in rows:
-                key = f"{row.get('doc_id')}|{row.get('file_date')}"
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    all_records.append(row)
+            all_records.extend(self._scrape_month(year, month))
 
         self.logger.info(f"Harris: {len(all_records)} total records")
         return all_records
@@ -200,7 +194,12 @@ class HarrisCountyScraper(BaseScraper):
             detail_url = ''
             if link_tag and link_tag.get('href'):
                 href = link_tag['href']
-                detail_url = href if href.startswith('http') else BASE_URL + href
+                if href.startswith('http'):
+                    detail_url = href
+                elif href.startswith('/'):
+                    detail_url = BASE_URL + href
+                else:
+                    detail_url = BASE_URL + '/' + href
 
             rows.append({
                 'doc_id':     doc_id,
