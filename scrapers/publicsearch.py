@@ -92,8 +92,12 @@ class PublicSearchScraper(BaseScraper):
                 browser = pw.chromium.launch(headless=True)
                 context = browser.new_context(user_agent=(
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
                 ))
+                # Hide webdriver flag so portal doesn't show "browser outdated" warning
+                context.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => false})"
+                )
                 page = context.new_page()
                 page.set_default_timeout(30_000)
 

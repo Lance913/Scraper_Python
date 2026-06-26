@@ -2,18 +2,11 @@
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
 
-The portal is ASP.NET WebForms with Telerik RadComboBox dropdowns.
-Playwright + select_option / TreeWalker / $find all fail because
-they don't fire the ASP.NET postback mechanism.
+HTTP POST approach — bypasses Telerik RadComboBox UI entirely.
+  GET page → capture ViewState → single POST with year+month → parse table.
 
-Solution: pure HTTP POST approach.
-  1. GET the page → scrape ViewState / EventValidation
-  2. POST with year selected → get updated form state
-  3. POST with month selected → get results table with Doc ID / Sale Date / File Date
-  4. Parse the table and filter to target_date
-
-Handles both full-page postback responses (plain HTML) and
-ASP.NET UpdatePanel partial-update responses (pipe-delimited).
+UpdatePanel detection: check if response starts with digit (pipe-delimited format)
+vs full HTML (starts with <).
 """
 
 import re
@@ -40,24 +33,24 @@ class HarrisCountyScraper(BaseScraper):
 
     def scrape(self, target_date: date) -> List[Dict]:
         self.logger.info(f"Scraping Harris County for {target_date}")
-        records = []
+        records   = []
         year_str  = str(target_date.year)
         month_str = MONTH_LABELS[target_date.month]
-
-        # Normalize target date to "M/D/YYYY" (no leading zeros) for comparison
         target_file = f"{target_date.month}/{target_date.day}/{target_date.year}"
 
         try:
-            # ── Step 1: GET initial page ───────────────────────────────────
+            # ── GET initial page ───────────────────────────────────────────
             resp = self.get(SEARCH_URL)
             if not resp:
                 self.logger.error("Harris: could not load portal")
                 return []
 
             soup, form_data = self._parse_form(resp.text)
-            self.logger.info(f"Harris: loaded portal, ViewState len={len(form_data.get('__VIEWSTATE',''))}")
+            self.logger.info(f"Harris: loaded portal (ViewState len={len(form_data.get('__VIEWSTATE',''))})")
+            self.logger.info(f"Harris: form fields: {[k for k in form_data if not k.startswith('__')]}")
 
-            # ── Step 2: POST to select year ────────────────────────────────
+            # ── Step 1: select year ────────────────────────────────────────
+            # Some ASP.NET sites need the year change before month can be selected
             form_data['__EVENTTARGET']   = 'ctl00$ContentPlaceHolder1$ddlYear'
             form_data['__EVENTARGUMENT'] = ''
             form_data['ctl00$ContentPlaceHolder1$ddlYear']  = year_str
@@ -69,33 +62,42 @@ class HarrisCountyScraper(BaseScraper):
                 return []
 
             html2 = self._extract_html(resp2.text)
-            soup2, form_data2 = self._parse_form(html2)
-            self.logger.info(f"Harris: year={year_str} selected, response len={len(html2)}")
+            self.logger.info(f"Harris: year POST → {len(html2)} chars; first 300: {repr(html2[:300])}")
 
-            # ── Step 3: POST to select month ───────────────────────────────
-            form_data2['__EVENTTARGET']   = 'ctl00$ContentPlaceHolder1$ddlMonth'
-            form_data2['__EVENTARGUMENT'] = ''
-            form_data2['ctl00$ContentPlaceHolder1$ddlYear']  = year_str
-            form_data2['ctl00$ContentPlaceHolder1$ddlMonth'] = month_str
+            soup2, form2 = self._parse_form(html2)
 
-            resp3 = self.post(SEARCH_URL, data=form_data2)
+            # ── Step 2: select month ───────────────────────────────────────
+            form2['__EVENTTARGET']   = 'ctl00$ContentPlaceHolder1$ddlMonth'
+            form2['__EVENTARGUMENT'] = ''
+            form2['ctl00$ContentPlaceHolder1$ddlYear']  = year_str
+            form2['ctl00$ContentPlaceHolder1$ddlMonth'] = month_str
+
+            resp3 = self.post(SEARCH_URL, data=form2)
             if not resp3:
                 self.logger.error("Harris: month POST failed")
                 return []
 
             html3 = self._extract_html(resp3.text)
-            soup3, _ = self._parse_form(html3)
-            self.logger.info(f"Harris: month={month_str} selected, response len={len(html3)}")
+            self.logger.info(f"Harris: month POST → {len(html3)} chars; first 600: {repr(html3[:600])}")
 
-            # ── Step 4: Parse results table ────────────────────────────────
+            soup3 = BeautifulSoup(html3, 'lxml')
+
+            # Log ALL tables found
+            all_tables = soup3.find_all('table')
+            self.logger.info(f"Harris: {len(all_tables)} tables in response")
+            for i, t in enumerate(all_tables[:5]):
+                rows = t.find_all('tr')
+                self.logger.info(
+                    f"Harris: table[{i}] id={t.get('id')} "
+                    f"class={t.get('class')} rows={len(rows)} "
+                    f"text[:80]={t.get_text(' ', strip=True)[:80]}"
+                )
+
             rows = self._parse_results_table(soup3)
             self.logger.info(f"Harris: {len(rows)} rows for {month_str} {year_str}")
-
-            # Show first 3 rows so we know what we're getting
             for r in rows[:3]:
-                self.logger.info(f"Harris: row sample: {r}")
+                self.logger.info(f"Harris: sample row: {r}")
 
-            # ── Step 5: Filter to target date and enrich ───────────────────
             for row in rows:
                 if self._norm_date(row.get('file_date', '')) != target_file:
                     continue
@@ -108,15 +110,14 @@ class HarrisCountyScraper(BaseScraper):
                 time.sleep(0.3)
 
         except Exception as exc:
-            self.logger.error(f"Harris scraper error: {exc}", exc_info=True)
+            self.logger.error(f"Harris error: {exc}", exc_info=True)
 
         self.logger.info(f"Harris: {len(records)} records for {target_date}")
         return records
 
-    # ── ASP.NET form handling ─────────────────────────────────────────────────
+    # ── Form handling ─────────────────────────────────────────────────────────
 
     def _parse_form(self, html: str) -> Tuple[BeautifulSoup, dict]:
-        """Extract all hidden form inputs into a dict."""
         soup = BeautifulSoup(html, 'lxml')
         data = {}
         for inp in soup.find_all('input'):
@@ -124,7 +125,6 @@ class HarrisCountyScraper(BaseScraper):
             value = inp.get('value', '')
             if name:
                 data[name] = value
-        # Also capture select values
         for sel in soup.find_all('select'):
             name = sel.get('name', '')
             if name:
@@ -134,57 +134,73 @@ class HarrisCountyScraper(BaseScraper):
 
     def _extract_html(self, raw: str) -> str:
         """
-        ASP.NET UpdatePanel responses look like:
-          3|updatePanel|panelId|<html content>|...
-        Full-page postbacks are plain HTML.
-        Extract the HTML portion from either format.
+        Handle both full HTML responses and ASP.NET UpdatePanel partial-update responses.
+        UpdatePanel format: length|type|id|content| (starts with a digit)
         """
-        if raw.startswith('<?xml') or raw.strip().startswith('<!DOCTYPE') or raw.strip().startswith('<html'):
-            return raw  # already full HTML
+        stripped = raw.strip()
 
-        # UpdatePanel format: segments separated by | with length prefix
-        # Pattern: length|type|id|content|
-        try:
-            # Find the largest updatePanel block which contains the main content
-            best = ''
-            i = 0
-            while i < len(raw):
-                pipe1 = raw.find('|', i)
-                if pipe1 == -1:
-                    break
-                try:
-                    length = int(raw[i:pipe1])
-                except ValueError:
-                    break
-                pipe2 = raw.find('|', pipe1 + 1)
-                if pipe2 == -1:
-                    break
-                block_type = raw[pipe1 + 1:pipe2]
-                pipe3 = raw.find('|', pipe2 + 1)
-                if pipe3 == -1:
-                    break
-                # block_id = raw[pipe2 + 1:pipe3]
-                content_start = pipe3 + 1
-                content = raw[content_start:content_start + length]
-                if block_type == 'updatePanel' and len(content) > len(best):
-                    best = content
-                i = content_start + length + 1  # skip trailing |
-
-            return best if best else raw
-        except Exception:
+        # If it looks like HTML, return as-is
+        if stripped.startswith('<') or stripped.startswith('<!'):
             return raw
+
+        # Otherwise attempt UpdatePanel parsing
+        # Format: len|type|id|content| for each segment
+        best = ''
+        i = 0
+        while i < len(raw):
+            pipe1 = raw.find('|', i)
+            if pipe1 == -1:
+                break
+            length_str = raw[i:pipe1]
+            try:
+                length = int(length_str)
+            except ValueError:
+                break
+            pipe2 = raw.find('|', pipe1 + 1)
+            if pipe2 == -1:
+                break
+            block_type = raw[pipe1 + 1:pipe2]
+            pipe3 = raw.find('|', pipe2 + 1)
+            if pipe3 == -1:
+                break
+            content_start = pipe3 + 1
+            content = raw[content_start:content_start + length]
+            if block_type in ('updatePanel', 'pageContent') and len(content) > len(best):
+                best = content
+            i = content_start + length + 1  # skip trailing |
+            if i >= len(raw):
+                break
+
+        self.logger.info(f"Harris: _extract_html: format={'updatePanel' if best else 'fullHTML'}, extracted={len(best or raw)} chars")
+        return best if best else raw
 
     # ── Results table ─────────────────────────────────────────────────────────
 
     def _parse_results_table(self, soup: BeautifulSoup) -> List[Dict]:
-        rows  = []
+        rows = []
+        # Try ID patterns first
         table = (
-            soup.find('table', id=re.compile(r'grd|grid|result|foreclos', re.I))
-            or soup.find('table', class_=re.compile(r'grd|grid|result', re.I))
-            or self._find_data_table(soup)
+            soup.find('table', id=re.compile(r'grd|grid|result|foreclos|frcl', re.I))
+            or soup.find('table', class_=re.compile(r'grd|grid|result|data', re.I))
         )
+        # Fallback: any table with a date AND a link
         if not table:
-            self.logger.warning("Harris: no results table found in response")
+            for t in soup.find_all('table'):
+                text = t.get_text()
+                if re.search(r'\d{1,2}/\d{1,2}/\d{4}', text) and t.find('a'):
+                    table = t
+                    break
+        # Last resort: any table with 3+ columns
+        if not table:
+            for t in soup.find_all('table'):
+                trs = t.find_all('tr')
+                if trs and len(trs[0].find_all(['th', 'td'])) >= 3:
+                    table = t
+                    self.logger.info("Harris: using last-resort table")
+                    break
+
+        if not table:
+            self.logger.warning("Harris: no results table found")
             return rows
 
         for tr in table.find_all('tr')[1:]:
@@ -204,22 +220,15 @@ class HarrisCountyScraper(BaseScraper):
             })
         return rows
 
-    def _find_data_table(self, soup: BeautifulSoup) -> Optional[object]:
-        """Fallback: find any table that has a date-like value in its cells."""
-        for table in soup.find_all('table'):
-            text = table.get_text()
-            if re.search(r'\d{1,2}/\d{1,2}/\d{4}', text):
-                return table
-        return None
-
     # ── Document detail ───────────────────────────────────────────────────────
 
     def _fetch_detail(self, url: str) -> Dict:
+        empty = {'first_name': '', 'last_name': '', 'address': '', 'city': '', 'zip_code': ''}
         if not url:
-            return {'first_name': '', 'last_name': '', 'address': '', 'city': '', 'zip_code': ''}
+            return empty
         resp = self.get(url)
         if not resp:
-            return {'first_name': '', 'last_name': '', 'address': '', 'city': '', 'zip_code': ''}
+            return empty
         text  = BeautifulSoup(resp.text, 'lxml').get_text(' ', strip=True)
         first, last = '', ''
         m = re.search(r'Grantor[:\s]+([A-Z][A-Z\s,\.]+?)(?:Grantee|Trustee|Said|Dated)', text, re.I)
@@ -242,6 +251,5 @@ class HarrisCountyScraper(BaseScraper):
 
     @staticmethod
     def _norm_date(d: str) -> str:
-        """Normalize '06/26/2026' → '6/26/2026' for comparison."""
         m = re.match(r'^0?(\d{1,2})/0?(\d{1,2})/(\d{4})$', d.strip())
         return f"{m.group(1)}/{m.group(2)}/{m.group(3)}" if m else d
