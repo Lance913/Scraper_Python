@@ -1,12 +1,11 @@
 """
 PublicSearch.us Scraper — Bexar, Dallas, Tarrant
 
-Search is working. Fixes:
-1. DOM parser now uses column-index extraction (no regex address matching)
-2. Extracts GRANTOR, DOC TYPE, RECORDED DATE, PROPERTY ADDRESS by column name
-3. Includes all doc types so NTS records aren't filtered out
-4. Searches last 30 days to capture notices filed earlier in the month
-5. Parses "STREET, CITY, TEXAS, ZIP" address format correctly
+Data confirmed working. Improvements:
+- Bexar: has PROPERTY ADDRESS column → parse street/city/zip correctly
+- Dallas: has TOWN + LEGAL DESCRIPTION → use TOWN for city, skip legal descriptions
+- Tarrant: has LEGAL DESCRIPTION with "CITY, Subdivision:..." → parse city from it
+- All: extract DOC TYPE so user can filter in Sheets for NTS specifically
 """
 
 import re
@@ -31,7 +30,7 @@ class PublicSearchScraper(BaseScraper):
 
     def scrape(self, target_date: date) -> List[Dict]:
         self.logger.info(f"Scraping {self.county} County for {target_date}")
-        # Search last 30 days — NTS notices for July 7 auction filed from ~June 1
+        # 30-day window: NTS for July 7 auction filed from ~June 1+
         start_iso = (target_date - timedelta(days=30)).strftime('%Y-%m-%d')
         end_iso   = target_date.strftime('%Y-%m-%d')
         records   = self._playwright_scrape(start_iso, end_iso)
@@ -58,9 +57,7 @@ class PublicSearchScraper(BaseScraper):
                 if 'json' not in response.headers.get('content-type', ''):
                     return
                 data = response.json()
-                keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
-                self.logger.info(f"{self.county}: JSON from {response.url} keys:{keys}")
-                captured_json.append({'url': response.url, 'data': data})
+                captured_json.append(data)
             except Exception:
                 pass
 
@@ -75,7 +72,6 @@ class PublicSearchScraper(BaseScraper):
                 page.on('response', on_response)
                 page.set_default_timeout(30_000)
 
-                # Load portal and go to Advanced Search
                 page.goto(self.base_url)
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(1500)
@@ -84,17 +80,14 @@ class PublicSearchScraper(BaseScraper):
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(1500)
 
-                # Fill date range (confirmed working: input[id*="start"])
                 filled = self._fill_date_range(page, start_fmt, end_fmt)
                 self.logger.info(f"{self.county}: date fill → {filled}")
 
-                # Click Search
                 for btn_sel in ['button[type="submit"]', 'button:has-text("Search")']:
                     try:
                         btn = page.locator(btn_sel).first
                         if btn.count() > 0:
                             btn.click()
-                            self.logger.info(f"{self.county}: clicked Search")
                             break
                     except Exception:
                         pass
@@ -102,18 +95,13 @@ class PublicSearchScraper(BaseScraper):
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(4000)
 
-                body = page.inner_text('body')
-                self.logger.info(f"{self.county} results: {body[:600]}")
-
                 html_content = page.content()
                 browser.close()
 
-            # Try API responses first
             records = []
-            for entry in captured_json:
-                records.extend(self._parse_json(entry['data'], end_iso))
+            for data in captured_json:
+                records.extend(self._parse_json(data, end_iso))
 
-            # DOM extraction (primary for this portal)
             if not records:
                 records = self._parse_dom(html_content, end_iso)
 
@@ -132,26 +120,21 @@ class PublicSearchScraper(BaseScraper):
         ]
         for start_sel, end_sel in pairs:
             try:
-                s = page.locator(start_sel)
-                e = page.locator(end_sel)
-                if s.count() > 0 and e.count() > 0:
+                if page.locator(start_sel).count() > 0 and page.locator(end_sel).count() > 0:
                     page.fill(start_sel, start_fmt)
                     page.fill(end_sel, end_fmt)
                     page.wait_for_timeout(300)
-                    return f"filled '{start_sel}' with {start_fmt}/{end_fmt}"
+                    return f"filled '{start_sel}'"
             except Exception:
                 pass
-
-        # Last resort: first two visible text inputs
         try:
             inputs = [i for i in page.locator('input[type="text"], input:not([type])').all() if i.is_visible()]
             if len(inputs) >= 2:
                 inputs[0].fill(start_fmt)
                 inputs[1].fill(end_fmt)
-                return f"filled first 2 visible inputs"
+                return "filled first 2 visible inputs"
         except Exception as e:
-            self.logger.warning(f"{self.county}: fallback fill failed: {e}")
-
+            self.logger.warning(f"{self.county}: fill fallback error: {e}")
         return "no fields filled"
 
     # ── DOM parser ────────────────────────────────────────────────────────────
@@ -165,34 +148,40 @@ class PublicSearchScraper(BaseScraper):
             if 'grantor' not in headers:
                 continue
 
-            self.logger.info(f"{self.county}: results table headers: {headers}")
-
-            # Map column names to indices
+            self.logger.info(f"{self.county}: table headers: {headers}")
             h  = {v: i for i, v in enumerate(headers)}
+
             gi = h.get('grantor', -1)
             di = h.get('doc type', -1)
             ri = h.get('recorded date', -1)
-            # Address column varies by county
-            ai = h.get('property address',
-                 h.get('legal description',
-                 h.get('town', -1)))
 
-            rows_extracted = 0
+            # Address columns vary by county
+            # Bexar has 'property address'
+            # Dallas has 'legal description' + 'town' (city)
+            # Tarrant has 'legal description' (contains city)
+            addr_i = h.get('property address', -1)
+            town_i = h.get('town', -1)
+            desc_i = h.get('legal description', -1)
+
+            count = 0
             for tr in table.find_all('tr')[1:]:
                 cells = [td.get_text(' ', strip=True) for td in tr.find_all('td')]
                 if not cells or not any(c.strip() for c in cells):
                     continue
 
-                grantor  = cells[gi].strip()  if (gi >= 0 and gi < len(cells))  else ''
-                doc_type = cells[di].strip()  if (di >= 0 and di < len(cells))  else ''
-                rec_date = cells[ri].strip()  if (ri >= 0 and ri < len(cells))  else date_str
-                addr_raw = cells[ai].strip()  if (ai >= 0 and ai < len(cells))  else ''
+                def cell(i):
+                    return cells[i].strip() if 0 <= i < len(cells) else ''
 
+                grantor  = cell(gi)
+                doc_type = cell(di)
+                rec_date = cell(ri) or date_str
                 if not grantor:
                     continue
 
-                first, last           = self.parse_name(grantor)
-                address, city, zip_c  = self._split_address(addr_raw)
+                first, last = self.parse_name(grantor)
+                address, city, zip_c = self._extract_address(
+                    cell(addr_i), cell(town_i), cell(desc_i)
+                )
 
                 records.append(self.build_record(
                     first_name=first, last_name=last,
@@ -200,21 +189,43 @@ class PublicSearchScraper(BaseScraper):
                     file_date=self._fmt(rec_date),
                     sale_date='',
                 ))
-                rows_extracted += 1
+                count += 1
 
-            self.logger.info(f"{self.county}: extracted {rows_extracted} rows")
+            self.logger.info(f"{self.county}: extracted {count} rows")
 
         return records
 
+    def _extract_address(self, prop_addr: str, town: str, legal_desc: str) -> Tuple[str, str, str]:
+        """
+        Bexar:  prop_addr = "6518 LOWRIE BLOCK, SAN ANTONIO, TEXAS, 78239"
+        Dallas: town = "GARLAND", legal_desc = "Subdivision - Name: ..."
+        Tarrant: legal_desc = "FORT WORTH, Subdivision: COBBS ORCHARD, ..."
+        """
+
+        # ── Bexar: full address in prop_addr ──────────────────────────────
+        if prop_addr and prop_addr != 'N/A':
+            return self._split_csv_address(prop_addr)
+
+        # ── Dallas: TOWN column has city, legal_desc has legal description ─
+        if town and town not in ('N/A', ''):
+            city = town.strip().title()
+            return '', city, ''
+
+        # ── Tarrant: legal_desc starts with "CITY, Subdivision: ..." ──────
+        if legal_desc and legal_desc not in ('N/A', ''):
+            # Try "FORT WORTH, Subdivision: ..." pattern
+            m = re.match(r'^([A-Z][A-Z\s]+?),\s*(?:Subdivision|Survey|Lot)', legal_desc, re.I)
+            if m:
+                return '', m.group(1).strip().title(), ''
+
+        return '', '', ''
+
     @staticmethod
-    def _split_address(raw: str) -> Tuple[str, str, str]:
+    def _split_csv_address(raw: str) -> Tuple[str, str, str]:
         """Parse 'STREET, CITY, TEXAS, 78239' → (street, city, zip)."""
-        if not raw:
-            return '', '', ''
-        parts   = [p.strip() for p in raw.split(',')]
-        street  = parts[0].title() if parts else ''
-        city    = ''
-        zip_c   = ''
+        parts  = [p.strip() for p in raw.split(',')]
+        street = parts[0].title() if parts else ''
+        city, zip_c = '', ''
         for part in parts[1:]:
             m = re.search(r'\b(\d{5})\b', part)
             if m:
@@ -226,37 +237,29 @@ class PublicSearchScraper(BaseScraper):
                 city = part.strip().title()
         return street, city, zip_c
 
-    # ── JSON parser (if API responses captured) ───────────────────────────────
-
     def _parse_json(self, data, date_str: str) -> List[Dict]:
-        items = (
-            data.get('results') or data.get('instruments') or
-            data.get('data') or data.get('items') or
-            (data if isinstance(data, list) else [])
-        )
-        if not isinstance(items, list) or not items:
+        items = (data.get('results') or data.get('instruments') or
+                 data.get('data') or (data if isinstance(data, list) else []))
+        if not isinstance(items, list):
             return []
         records = []
         for item in items:
             if not isinstance(item, dict):
                 continue
             raw_name = ''
-            grantors = item.get('grantors') or item.get('grantor') or []
-            if isinstance(grantors, list) and grantors:
-                g = grantors[0]
-                raw_name = g.get('name', '') if isinstance(g, dict) else str(g)
-            elif isinstance(grantors, str):
-                raw_name = grantors
+            g = item.get('grantors') or item.get('grantor') or []
+            if isinstance(g, list) and g:
+                raw_name = g[0].get('name', '') if isinstance(g[0], dict) else str(g[0])
+            elif isinstance(g, str):
+                raw_name = g
             first, last = self.parse_name(raw_name) if raw_name else ('', '')
-            raw_addr = (item.get('siteAddress') or item.get('propertyAddress')
-                        or item.get('address') or '')
-            address, city, zip_c = self._split_address(raw_addr) if raw_addr else ('', '', '')
-            file_date = self._fmt(item.get('fileDate') or item.get('recordingDate') or date_str)
-            sale_date = self._fmt(item.get('saleDate') or '')
+            raw_addr = item.get('siteAddress') or item.get('propertyAddress') or item.get('address', '')
+            addr, city, zip_c = self._split_csv_address(raw_addr) if raw_addr else ('', '', '')
             records.append(self.build_record(
                 first_name=first, last_name=last,
-                address=address, city=city, zip_code=zip_c,
-                file_date=file_date, sale_date=sale_date,
+                address=addr, city=city, zip_code=zip_c,
+                file_date=self._fmt(item.get('fileDate') or date_str),
+                sale_date=self._fmt(item.get('saleDate') or ''),
             ))
         return records
 

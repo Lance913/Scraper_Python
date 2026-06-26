@@ -1,7 +1,13 @@
 """
 Harris County Foreclosure Scraper
-TreeWalker confirmed year/month are in <OPTION> elements (standard <select>).
-Fix: use page.select_option() to set the dropdowns properly.
+Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
+
+Select IDs confirmed:
+  Year:  #ctl00_ContentPlaceHolder1_ddlYear
+  Month: #ctl00_ContentPlaceHolder1_ddlMonth
+
+Fix: select_option() sets the value but doesn't trigger ASP.NET postback.
+Must call __doPostBack() after each selection to reload results.
 """
 
 import re
@@ -13,6 +19,10 @@ from .base import BaseScraper
 
 SEARCH_URL = "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx"
 BASE_URL   = "https://www.cclerk.hctx.net"
+YEAR_SEL   = "select#ctl00_ContentPlaceHolder1_ddlYear"
+MONTH_SEL  = "select#ctl00_ContentPlaceHolder1_ddlMonth"
+YEAR_NAME  = "ctl00$ContentPlaceHolder1$ddlYear"
+MONTH_NAME = "ctl00$ContentPlaceHolder1$ddlMonth"
 
 MONTH_NAMES = {
     1: 'January', 2: 'February', 3: 'March',    4: 'April',
@@ -50,74 +60,19 @@ class HarrisCountyScraper(BaseScraper):
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(1000)
 
-                # ── Inspect all <select> elements ──────────────────────────
-                select_info = page.evaluate("""
-                    () => {
-                        return Array.from(document.querySelectorAll('select')).map((s, i) => ({
-                            index: i,
-                            id: s.id,
-                            name: s.name,
-                            options: Array.from(s.options).map(o => o.text.trim()).slice(0, 6)
-                        }));
-                    }
-                """)
-                self.logger.info(f"Harris selects: {select_info}")
+                # ── Select year + trigger ASP.NET postback ─────────────────
+                page.select_option(YEAR_SEL, label=year_str)
+                page.evaluate(f"() => {{ if(typeof __doPostBack!=='undefined') __doPostBack('{YEAR_NAME}',''); }}")
+                page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(2000)
+                self.logger.info(f"Harris: year set to {year_str}")
 
-                # ── Select year ────────────────────────────────────────────
-                year_done = False
-                for info in select_info:
-                    if year_str in info['options']:
-                        sel = f"select#{info['id']}" if info['id'] else f"select[name='{info['name']}']" if info['name'] else f"select:nth-of-type({info['index']+1})"
-                        try:
-                            page.select_option(sel, label=year_str)
-                            page.wait_for_load_state('networkidle')
-                            page.wait_for_timeout(1500)
-                            self.logger.info(f"Harris: selected year via '{sel}'")
-                            year_done = True
-                            break
-                        except Exception as e:
-                            self.logger.warning(f"Harris: year select error on '{sel}': {e}")
-
-                if not year_done:
-                    # Fallback: try all selects
-                    for sel_str in ['select']:
-                        try:
-                            page.select_option(sel_str, label=year_str)
-                            page.wait_for_load_state('networkidle')
-                            page.wait_for_timeout(1500)
-                            self.logger.info("Harris: year selected via generic select")
-                            year_done = True
-                            break
-                        except Exception:
-                            pass
-
-                # Re-inspect selects after year selection (month select may update)
-                select_info2 = page.evaluate("""
-                    () => {
-                        return Array.from(document.querySelectorAll('select')).map((s, i) => ({
-                            index: i,
-                            id: s.id,
-                            name: s.name,
-                            options: Array.from(s.options).map(o => o.text.trim()).slice(0, 15)
-                        }));
-                    }
-                """)
-                self.logger.info(f"Harris selects after year: {select_info2}")
-
-                # ── Select month ───────────────────────────────────────────
-                month_done = False
-                for info in select_info2:
-                    if month_str in info['options']:
-                        sel = f"select#{info['id']}" if info['id'] else f"select[name='{info['name']}']" if info['name'] else f"select:nth-of-type({info['index']+1})"
-                        try:
-                            page.select_option(sel, label=month_str)
-                            page.wait_for_load_state('networkidle')
-                            page.wait_for_timeout(1500)
-                            self.logger.info(f"Harris: selected month via '{sel}'")
-                            month_done = True
-                            break
-                        except Exception as e:
-                            self.logger.warning(f"Harris: month select error on '{sel}': {e}")
+                # ── Select month + trigger postback ────────────────────────
+                page.select_option(MONTH_SEL, label=month_str)
+                page.evaluate(f"() => {{ if(typeof __doPostBack!=='undefined') __doPostBack('{MONTH_NAME}',''); }}")
+                page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(2000)
+                self.logger.info(f"Harris: month set to {month_str}")
 
                 body = page.inner_text('body')
                 self.logger.info(f"Harris body after selections: {body[:800]}")
@@ -127,7 +82,7 @@ class HarrisCountyScraper(BaseScraper):
 
             soup = BeautifulSoup(content, 'lxml')
             rows = self._parse_results_table(soup)
-            self.logger.info(f"Harris: {len(rows)} rows found for {month_str} {year_str}")
+            self.logger.info(f"Harris: {len(rows)} rows for {month_str} {year_str}")
 
             for row in rows:
                 if row.get('file_date') != target_file:
