@@ -18,7 +18,7 @@ from .base import BaseScraper
 
 EXCLUDE_KEYWORDS = [
     'GROUNDWATER', 'CONSERVATION DISTRICT', 'WATER DISTRICT',
-    'INTERNAL REVENUE', 'D R HORTON', 'DR HORTON',
+    'INTERNAL REVENUE', 'D R HORTON', 'DR HORTON', 'HORTON D R',
     'LENNAR HOMES', 'KB HOME', 'MERITAGE', 'PULTE',
     'CENTEX', 'TAYLOR MORRISON', 'STARLIGHT HOMES',
     'CONTINENTAL HOMES', 'BEAZER HOMES', 'CHESMAR HOMES',
@@ -144,9 +144,11 @@ class PublicSearchScraper(BaseScraper):
                     self.logger.info(f"{self.county}: page {page_num} → {len(nts_rows)} NTS rows")
 
                     for row in nts_rows:
-                        grantor_full = row.get('first_name', '') + ' ' + row.get('last_name', '')
-                        if not is_residential_lead(grantor_full):
-                            self.logger.info(f"{self.county}: skip entity: {row.get('last_name')}")
+                        # Use original grantor string, not parsed name
+                        # (parse_name reverses "HORTON D R TEXAS LTD" → "Horton D R Texas Ltd"
+                        #  which breaks substring matches like 'D R HORTON')
+                        if not is_residential_lead(row.get('grantor', '')):
+                            self.logger.info(f"{self.county}: skip entity: {row.get('grantor')}")
                             continue
                         rec = self._fetch_sale_date(page, row)
                         records.append(rec)
