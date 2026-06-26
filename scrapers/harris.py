@@ -130,10 +130,12 @@ class HarrisCountyScraper(BaseScraper):
                             page.wait_for_load_state('networkidle', timeout=12_000)
                             page.wait_for_timeout(500)
                             detail_text = page.inner_text('body')
-                            self.logger.debug(
-                                f"Harris detail ({len(detail_text)} chars): "
-                                f"{detail_text[:200].replace(chr(10),' ')}"
-                            )
+                            if not records:  # Log first detail page only
+                                self.logger.info(
+                                    f"Harris DETAIL PAGE SAMPLE "
+                                    f"({len(detail_text)} chars): "
+                                    + detail_text[:500].replace(chr(10),' ')[:300]
+                                )
                             parsed   = self._parse_detail_text(detail_text)
                             first    = parsed.get('first_name', '')
                             last     = parsed.get('last_name', '')
