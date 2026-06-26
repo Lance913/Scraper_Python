@@ -1,21 +1,16 @@
 name: Daily TX Foreclosure Scraper
 
 on:
-  # 7:00 AM CST = 13:00 UTC (CST is UTC-6)
-  # TX observes CDT (UTC-5) Mar–Nov, so this fires at 8am in summer.
-  # Adjust to "0 12 * * *" if you want 7am CDT year-round.
   schedule:
-    - cron: '0 13 * * *'
-
-  # Also allow manual trigger from the GitHub Actions UI
+    - cron: '0 13 * * *'   # 7:00 AM CST (UTC-6). Adjust to '0 12 * * *' for CDT.
   workflow_dispatch:
     inputs:
       date:
-        description: 'Specific date to scrape (YYYY-MM-DD). Leave blank for today.'
+        description: 'Date to scrape (YYYY-MM-DD). Leave blank for today.'
         required: false
         default: ''
       counties:
-        description: 'Counties (space-separated): harris bexar dallas tarrant'
+        description: 'Counties: harris bexar dallas tarrant'
         required: false
         default: 'harris bexar dallas tarrant'
       dry_run:
@@ -27,7 +22,7 @@ jobs:
   scrape:
     name: Scrape foreclosure data
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repo
@@ -39,43 +34,45 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # ── Build the CLI args dynamically ──────────────────────────────────────
-      - name: Prepare CLI arguments
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright + Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Install Chromium system deps (cached run)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
+
+      - name: Build CLI arguments
         id: args
         run: |
           ARGS=""
-
-          # Date arg (manual trigger only)
           DATE="${{ github.event.inputs.date }}"
-          if [ -n "$DATE" ]; then
-            ARGS="$ARGS --date $DATE"
-          fi
+          if [ -n "$DATE" ]; then ARGS="$ARGS --date $DATE"; fi
 
-          # Counties arg
           COUNTIES="${{ github.event.inputs.counties }}"
-          if [ -n "$COUNTIES" ]; then
-            ARGS="$ARGS --counties $COUNTIES"
-          fi
+          if [ -n "$COUNTIES" ]; then ARGS="$ARGS --counties $COUNTIES"; fi
 
-          # Dry-run flag
           DRY="${{ github.event.inputs.dry_run }}"
-          if [ "$DRY" = "true" ]; then
-            ARGS="$ARGS --dry-run"
-          fi
+          if [ "$DRY" = "true" ]; then ARGS="$ARGS --dry-run"; fi
 
           echo "cli_args=$ARGS" >> $GITHUB_OUTPUT
 
       - name: Run scraper
         env:
-          # Store the full GCP service account JSON as a GitHub Secret
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: |
-          python main.py ${{ steps.args.outputs.cli_args }}
+        run: python main.py ${{ steps.args.outputs.cli_args }}
 
-      - name: Upload log on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:

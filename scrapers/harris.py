@@ -2,17 +2,17 @@
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
 
-The portal uses ASP.NET WebForms with __VIEWSTATE. We:
-  1. GET the page to capture ViewState tokens
-  2. POST with the current year/month to retrieve that month's filings
-  3. Filter results to today's file date
-  4. Fetch each document detail page to extract grantor name + property address
+Uses Playwright to:
+  1. Navigate to the portal
+  2. Click the current year then current month
+  3. Extract the results table
+  4. Fetch each document detail page for name + address
 """
 
 import re
 import time
 from datetime import date
-from typing import List, Dict
+from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from .base import BaseScraper
 
@@ -20,8 +20,8 @@ SEARCH_URL = "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx"
 BASE_URL   = "https://www.cclerk.hctx.net"
 
 MONTH_NAMES = {
-    1: 'January', 2: 'February', 3: 'March', 4: 'April',
-    5: 'May', 6: 'June', 7: 'July', 8: 'August',
+    1: 'January', 2: 'February', 3: 'March',    4: 'April',
+    5: 'May',     6: 'June',     7: 'July',      8: 'August',
     9: 'September', 10: 'October', 11: 'November', 12: 'December',
 }
 
@@ -31,97 +31,116 @@ class HarrisCountyScraper(BaseScraper):
     def __init__(self):
         super().__init__('Harris')
 
-    # ── Public entry point ────────────────────────────────────────────────────
-
     def scrape(self, target_date: date) -> List[Dict]:
         self.logger.info(f"Scraping Harris County for {target_date}")
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.logger.error("Playwright not installed. Run: pip install playwright && playwright install chromium")
+            return []
+
         records = []
+        year_str  = str(target_date.year)
+        month_str = MONTH_NAMES[target_date.month]
+        # Target file-date string as shown on the portal (M/D/YYYY, no leading zeros)
+        target_file_str = f"{target_date.month}/{target_date.day}/{target_date.year}"
 
-        # Step 1: load page and grab ASP.NET tokens
-        resp = self.get(SEARCH_URL)
-        if not resp:
-            self.logger.error("Could not load Harris County search page")
-            return records
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                page    = browser.new_page()
+                page.set_default_timeout(30_000)
 
-        soup = BeautifulSoup(resp.text, 'lxml')
-        vs_data = self._extract_viewstate(soup)
+                self.logger.info("Harris: loading portal...")
+                page.goto(SEARCH_URL)
+                page.wait_for_load_state('networkidle')
 
-        # Step 2: POST with selected year/month
-        year  = str(target_date.year)
-        month = MONTH_NAMES[target_date.month]
+                # ── Select year ────────────────────────────────────────────
+                # The year list renders as <li> or <a> elements
+                year_sel = (
+                    f"li:has-text('{year_str}'), "
+                    f"a:has-text('{year_str}'), "
+                    f"span:has-text('{year_str}')"
+                )
+                year_el = page.query_selector(year_sel)
+                if year_el:
+                    year_el.click()
+                    page.wait_for_load_state('networkidle')
+                    self.logger.info(f"Harris: selected year {year_str}")
+                else:
+                    self.logger.warning(f"Harris: could not find year {year_str} element")
 
-        post_data = {
-            **vs_data,
-            '__EVENTTARGET':   '',
-            '__EVENTARGUMENT': '',
-            # Adjust these control IDs if the portal changes its naming
-            'ctl00$ContentPlaceHolder1$ddlYear':  year,
-            'ctl00$ContentPlaceHolder1$ddlMonth': month,
-            'ctl00$ContentPlaceHolder1$btnSearch': 'Search',
-        }
+                # ── Select month ───────────────────────────────────────────
+                month_sel = (
+                    f"li:has-text('{month_str}'), "
+                    f"a:has-text('{month_str}'), "
+                    f"span:has-text('{month_str}')"
+                )
+                month_el = page.query_selector(month_sel)
+                if month_el:
+                    month_el.click()
+                    page.wait_for_load_state('networkidle')
+                    self.logger.info(f"Harris: selected month {month_str}")
+                else:
+                    self.logger.warning(f"Harris: could not find month {month_str} element")
 
-        resp2 = self.post(SEARCH_URL, data=post_data)
-        if not resp2:
-            self.logger.error("Harris County POST failed")
-            return records
+                # ── Parse the results table ────────────────────────────────
+                content = page.content()
+                browser.close()
 
-        soup2 = BeautifulSoup(resp2.text, 'lxml')
-        rows  = self._parse_results_table(soup2)
-        self.logger.info(f"Harris: found {len(rows)} rows for {month} {year}")
+            soup  = BeautifulSoup(content, 'lxml')
+            rows  = self._parse_results_table(soup)
+            self.logger.info(f"Harris: {len(rows)} rows found for {month_str} {year_str}")
 
-        # Step 3: filter to today, fetch detail for each match
-        target_str = target_date.strftime('%-m/%-d/%Y')  # e.g. "6/25/2026"
-        for row in rows:
-            if row.get('file_date') != target_str:
-                continue
-            detail = self._fetch_detail(row.get('detail_url', ''))
-            if detail:
-                records.append(self.build_record(**detail, **row))
-            time.sleep(0.5)
+            # Filter to today's file date only
+            for row in rows:
+                if row.get('file_date') != target_file_str:
+                    continue
+                detail = self._fetch_detail(row.get('detail_url', ''))
+                if detail:
+                    detail.update({
+                        'county':    self.county,
+                        'file_date': row['file_date'],
+                        'sale_date': row.get('sale_date', ''),
+                    })
+                    records.append(self.build_record(**detail))
+                time.sleep(0.5)
 
-        self.logger.info(f"Harris: {len(records)} new records for {target_date}")
+        except Exception as exc:
+            self.logger.error(f"Harris scraper error: {exc}", exc_info=True)
+
+        self.logger.info(f"Harris: {len(records)} records for {target_date}")
         return records
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _extract_viewstate(self, soup: BeautifulSoup) -> Dict:
-        def val(field_id):
-            tag = soup.find('input', {'id': field_id})
-            return tag['value'] if tag else ''
-        return {
-            '__VIEWSTATE':          val('__VIEWSTATE'),
-            '__VIEWSTATEGENERATOR': val('__VIEWSTATEGENERATOR'),
-            '__EVENTVALIDATION':    val('__EVENTVALIDATION'),
-        }
-
     def _parse_results_table(self, soup: BeautifulSoup) -> List[Dict]:
         rows = []
-        # Harris renders results in a GridView table
+        # Harris renders a GridView table — try several selectors
         table = (
-            soup.find('table', id=re.compile(r'grd', re.I))
-            or soup.find('table', class_=re.compile(r'grid|result', re.I))
+            soup.find('table', id=re.compile(r'grd|grid|result', re.I))
+            or soup.find('table', class_=re.compile(r'grd|grid|result', re.I))
             or soup.find('table')
         )
         if not table:
             return rows
 
-        for tr in table.find_all('tr')[1:]:  # skip header
+        for tr in table.find_all('tr')[1:]:
             tds = tr.find_all('td')
             if len(tds) < 3:
                 continue
 
             link_tag   = tds[0].find('a')
-            doc_id     = tds[0].get_text(strip=True)
             sale_date  = tds[1].get_text(strip=True)
             file_date  = tds[2].get_text(strip=True)
             detail_url = ''
-
             if link_tag and link_tag.get('href'):
                 href = link_tag['href']
                 detail_url = href if href.startswith('http') else BASE_URL + href
 
             rows.append({
-                'doc_id':     doc_id,
+                'doc_id':     tds[0].get_text(strip=True),
                 'sale_date':  sale_date,
                 'file_date':  file_date,
                 'detail_url': detail_url,
@@ -131,26 +150,24 @@ class HarrisCountyScraper(BaseScraper):
     def _fetch_detail(self, url: str) -> Dict:
         if not url:
             return {}
-
         resp = self.get(url)
         if not resp:
             return {}
 
-        soup = BeautifulSoup(resp.text, 'lxml')
-        text = soup.get_text(' ', strip=True)
+        text = BeautifulSoup(resp.text, 'lxml').get_text(' ', strip=True)
 
-        # --- Grantor / owner name ---
         first, last = '', ''
-        m = re.search(r'Grantor[:\s]+([A-Z][A-Z\s,\.]+?)(?:Grantee|Trustee|Said|Dated)', text, re.I)
+        m = re.search(
+            r'Grantor[:\s]+([A-Z][A-Z\s,\.]+?)(?:Grantee|Trustee|Said|Dated|$)',
+            text, re.I
+        )
         if m:
-            raw_name = m.group(1).strip().strip(',')
-            first, last = self.parse_name(raw_name)
+            first, last = self.parse_name(m.group(1))
 
-        # --- Property address ---
         address, city, zip_code = '', '', ''
-        # Try "123 MAIN ST, HOUSTON, TX 77001" pattern
         m2 = re.search(
-            r'(\d+\s+[A-Z0-9][A-Z0-9\s]+?(?:ST|AVE|DR|RD|LN|BLVD|CT|WAY|PL|CIR|TRAIL|PKWY)[A-Z\s\.]*)'
+            r'(\d+\s+[A-Z0-9][A-Z0-9\s]+?'
+            r'(?:ST|AVE|DR|RD|LN|BLVD|CT|WAY|PL|CIR|TRAIL|PKWY)[A-Z\s\.]*?)'
             r',?\s+([A-Z][A-Z\s]+?),?\s+TX\s*(\d{5})',
             text, re.I
         )
