@@ -1,10 +1,11 @@
 """
-Main orchestrator for the TX Pre-Foreclosure Daily Scraper
+Main orchestrator — TX Pre-Foreclosure Daily Scraper
 
 Usage:
-  python main.py                     # scrape today
-  python main.py --date 2026-06-25   # scrape a specific date
-  python main.py --dry-run           # scrape but don't write to Sheets
+  python main.py                                          # all counties, today
+  python main.py --date 2026-06-25                        # specific date
+  python main.py --counties harris bexar dallas tarrant   # specific counties
+  python main.py --dry-run                                # scrape, don't write
 """
 
 import argparse
@@ -18,6 +19,8 @@ from scrapers import (
     BexarCountyScraper,
     DallasCountyScraper,
     TarrantCountyScraper,
+    DentonCountyScraper,
+    JohnsonCountyScraper,
 )
 import sheets_writer
 
@@ -28,69 +31,56 @@ logging.basicConfig(
 )
 logger = logging.getLogger('main')
 
+ALL_COUNTIES = ['harris', 'bexar', 'dallas', 'tarrant', 'denton', 'johnson']
+
+SCRAPER_MAP = {
+    'harris':  HarrisCountyScraper,
+    'bexar':   BexarCountyScraper,
+    'dallas':  DallasCountyScraper,
+    'tarrant': TarrantCountyScraper,
+    'denton':  DentonCountyScraper,
+    'johnson': JohnsonCountyScraper,
+}
+
 
 def parse_args():
     p = argparse.ArgumentParser(description='TX Foreclosure Scraper')
-    p.add_argument(
-        '--date',
-        type=str,
-        default=None,
-        help='Target date in YYYY-MM-DD format (default: today)',
-    )
-    p.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Scrape but do not write to Google Sheets',
-    )
-    p.add_argument(
-        '--counties',
-        nargs='+',
-        choices=['harris', 'bexar', 'dallas', 'tarrant'],
-        default=['harris', 'bexar', 'dallas', 'tarrant'],
-        help='Which counties to scrape (default: all four)',
-    )
+    p.add_argument('--date', type=str, default=None,
+                   help='Target date YYYY-MM-DD (default: today)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='Scrape but do not write to Google Sheets')
+    p.add_argument('--counties', nargs='+', choices=ALL_COUNTIES,
+                   default=ALL_COUNTIES,
+                   help='Counties to scrape (default: all)')
     return p.parse_args()
 
 
 def run_scrapers(target_date: date, counties: List[str]) -> List[Dict]:
-    scraper_map = {
-        'harris':  HarrisCountyScraper,
-        'bexar':   BexarCountyScraper,
-        'dallas':  DallasCountyScraper,
-        'tarrant': TarrantCountyScraper,
-    }
-
     all_records = []
     for name in counties:
-        cls = scraper_map[name]
+        cls = SCRAPER_MAP[name]
         try:
-            scraper = cls()
-            records = scraper.scrape(target_date)
+            records = cls().scrape(target_date)
             logger.info(f"{name.title()}: {len(records)} records")
             all_records.extend(records)
         except Exception as exc:
             logger.error(f"{name.title()} scraper crashed: {exc}", exc_info=True)
-
     return all_records
 
 
 def main():
     args = parse_args()
-
-    if args.date:
-        target_date = datetime.strptime(args.date, '%Y-%m-%d').date()
-    else:
-        target_date = date.today()
+    target_date = (datetime.strptime(args.date, '%Y-%m-%d').date()
+                   if args.date else date.today())
 
     logger.info(f"=== TX Foreclosure Scraper | {target_date} ===")
     logger.info(f"Counties: {', '.join(args.counties)}")
 
     records = run_scrapers(target_date, args.counties)
-
     logger.info(f"Total records collected: {len(records)}")
 
     if not records:
-        logger.warning("No records found. This is normal on weekends / non-filing days.")
+        logger.warning("No records found.")
         return
 
     if args.dry_run:

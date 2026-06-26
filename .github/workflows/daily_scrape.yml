@@ -2,7 +2,7 @@ name: Daily TX Foreclosure Scraper
 
 on:
   schedule:
-    - cron: '0 13 * * *'   # 7:00 AM CST (UTC-6). Adjust to '0 12 * * *' for CDT.
+    - cron: '0 13 * * *'   # 7:00 AM CST (UTC-6)
   workflow_dispatch:
     inputs:
       date:
@@ -10,9 +10,9 @@ on:
         required: false
         default: ''
       counties:
-        description: 'Counties: harris bexar dallas tarrant'
+        description: 'Counties: harris bexar dallas tarrant denton johnson'
         required: false
-        default: 'harris bexar dallas tarrant'
+        default: 'harris bexar dallas tarrant denton johnson'
       dry_run:
         description: 'Dry run? (true/false)'
         required: false
@@ -58,13 +58,10 @@ jobs:
           ARGS=""
           DATE="${{ github.event.inputs.date }}"
           if [ -n "$DATE" ]; then ARGS="$ARGS --date $DATE"; fi
-
           COUNTIES="${{ github.event.inputs.counties }}"
           if [ -n "$COUNTIES" ]; then ARGS="$ARGS --counties $COUNTIES"; fi
-
           DRY="${{ github.event.inputs.dry_run }}"
           if [ "$DRY" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-
           echo "cli_args=$ARGS" >> $GITHUB_OUTPUT
 
       - name: Run scraper
