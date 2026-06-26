@@ -2,12 +2,9 @@
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
 
-Select IDs confirmed:
-  Year:  #ctl00_ContentPlaceHolder1_ddlYear
-  Month: #ctl00_ContentPlaceHolder1_ddlMonth
-
-Fix: select_option() sets the value but doesn't trigger ASP.NET postback.
-Must call __doPostBack() after each selection to reload results.
+Fix: select_option() already fires ASP.NET onchange → postback → navigation.
+Calling page.evaluate(__doPostBack) after that destroys the execution context.
+Solution: just select_option() and wait for networkidle. That's all we need.
 """
 
 import re
@@ -21,8 +18,6 @@ SEARCH_URL = "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx"
 BASE_URL   = "https://www.cclerk.hctx.net"
 YEAR_SEL   = "select#ctl00_ContentPlaceHolder1_ddlYear"
 MONTH_SEL  = "select#ctl00_ContentPlaceHolder1_ddlMonth"
-YEAR_NAME  = "ctl00$ContentPlaceHolder1$ddlYear"
-MONTH_NAME = "ctl00$ContentPlaceHolder1$ddlMonth"
 
 MONTH_NAMES = {
     1: 'January', 2: 'February', 3: 'March',    4: 'April',
@@ -58,18 +53,15 @@ class HarrisCountyScraper(BaseScraper):
                 self.logger.info("Harris: loading portal...")
                 page.goto(SEARCH_URL)
                 page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(1000)
 
-                # ── Select year + trigger ASP.NET postback ─────────────────
+                # select_option fires ASP.NET onchange → automatic postback/navigation
+                # Just select and wait — no evaluate() needed
                 page.select_option(YEAR_SEL, label=year_str)
-                page.evaluate(f"() => {{ if(typeof __doPostBack!=='undefined') __doPostBack('{YEAR_NAME}',''); }}")
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(2000)
                 self.logger.info(f"Harris: year set to {year_str}")
 
-                # ── Select month + trigger postback ────────────────────────
                 page.select_option(MONTH_SEL, label=month_str)
-                page.evaluate(f"() => {{ if(typeof __doPostBack!=='undefined') __doPostBack('{MONTH_NAME}',''); }}")
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(2000)
                 self.logger.info(f"Harris: month set to {month_str}")
