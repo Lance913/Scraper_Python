@@ -1,0 +1,84 @@
+name: Daily TX Foreclosure Scraper
+
+on:
+  # 7:00 AM CST = 13:00 UTC (CST is UTC-6)
+  # TX observes CDT (UTC-5) Mar–Nov, so this fires at 8am in summer.
+  # Adjust to "0 12 * * *" if you want 7am CDT year-round.
+  schedule:
+    - cron: '0 13 * * *'
+
+  # Also allow manual trigger from the GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Specific date to scrape (YYYY-MM-DD). Leave blank for today.'
+        required: false
+        default: ''
+      counties:
+        description: 'Counties (space-separated): harris bexar dallas tarrant'
+        required: false
+        default: 'harris bexar dallas tarrant'
+      dry_run:
+        description: 'Dry run? (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  scrape:
+    name: Scrape foreclosure data
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Build the CLI args dynamically ──────────────────────────────────────
+      - name: Prepare CLI arguments
+        id: args
+        run: |
+          ARGS=""
+
+          # Date arg (manual trigger only)
+          DATE="${{ github.event.inputs.date }}"
+          if [ -n "$DATE" ]; then
+            ARGS="$ARGS --date $DATE"
+          fi
+
+          # Counties arg
+          COUNTIES="${{ github.event.inputs.counties }}"
+          if [ -n "$COUNTIES" ]; then
+            ARGS="$ARGS --counties $COUNTIES"
+          fi
+
+          # Dry-run flag
+          DRY="${{ github.event.inputs.dry_run }}"
+          if [ "$DRY" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+
+          echo "cli_args=$ARGS" >> $GITHUB_OUTPUT
+
+      - name: Run scraper
+        env:
+          # Store the full GCP service account JSON as a GitHub Secret
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: |
+          python main.py ${{ steps.args.outputs.cli_args }}
+
+      - name: Upload log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-logs-${{ github.run_id }}
+          path: '*.log'
+          if-no-files-found: ignore
