@@ -2,9 +2,14 @@
 Harris County Foreclosure Scraper
 Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
 
-Fix: select_option() already fires ASP.NET onchange → postback → navigation.
-Calling page.evaluate(__doPostBack) after that destroys the execution context.
-Solution: just select_option() and wait for networkidle. That's all we need.
+The portal uses Telerik RadComboBox dropdowns.
+select_option() sets the hidden native <select> but does NOT fire
+Telerik's event system — so the ASP.NET postback never triggers.
+
+Fix: use Telerik's JavaScript client API:
+  $find('controlClientID').findItemByText('June').select()
+This selects the item through Telerik's own system, which fires
+the postback and loads the results table.
 """
 
 import re
@@ -16,8 +21,10 @@ from .base import BaseScraper
 
 SEARCH_URL = "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx"
 BASE_URL   = "https://www.cclerk.hctx.net"
-YEAR_SEL   = "select#ctl00_ContentPlaceHolder1_ddlYear"
-MONTH_SEL  = "select#ctl00_ContentPlaceHolder1_ddlMonth"
+
+# Telerik RadComboBox client IDs (confirmed from page source)
+YEAR_CLIENT_ID  = 'ctl00_ContentPlaceHolder1_ddlYear'
+MONTH_CLIENT_ID = 'ctl00_ContentPlaceHolder1_ddlMonth'
 
 MONTH_NAMES = {
     1: 'January', 2: 'February', 3: 'March',    4: 'April',
@@ -42,7 +49,11 @@ class HarrisCountyScraper(BaseScraper):
         records     = []
         year_str    = str(target_date.year)
         month_str   = MONTH_NAMES[target_date.month]
-        target_file = f"{target_date.month}/{target_date.day}/{target_date.year}"
+        # Harris table may show '06/26/2026' or '6/26/2026' — normalize by stripping leading zeros
+        def _norm_date(d: str) -> str:
+            m = re.match(r'^0?(\d{1,2})/0?(\d{1,2})/(\d{4})$', d.strip())
+            return f'{m.group(1)}/{m.group(2)}/{m.group(3)}' if m else d
+        target_file = _norm_date(f'{target_date.month}/{target_date.day}/{target_date.year}')
 
         try:
             with sync_playwright() as pw:
@@ -53,18 +64,78 @@ class HarrisCountyScraper(BaseScraper):
                 self.logger.info("Harris: loading portal...")
                 page.goto(SEARCH_URL)
                 page.wait_for_load_state('networkidle')
+                page.wait_for_timeout(1000)
 
-                # select_option fires ASP.NET onchange → automatic postback/navigation
-                # Just select and wait — no evaluate() needed
-                page.select_option(YEAR_SEL, label=year_str)
+                # ── Select year via Telerik JavaScript API ─────────────────
+                year_result = page.evaluate(f"""
+                    () => {{
+                        try {{
+                            // Telerik's $find() API
+                            var rcb = $find('{YEAR_CLIENT_ID}');
+                            if (rcb) {{
+                                var item = rcb.findItemByText('{year_str}');
+                                if (item) {{
+                                    item.select();
+                                    return 'Telerik API: selected ' + item.get_text();
+                                }}
+                                return 'Telerik item not found for: {year_str}';
+                            }}
+                        }} catch(e) {{
+                            return 'Telerik error: ' + e.message;
+                        }}
+
+                        // Fallback: click via TreeWalker text node
+                        var walker = document.createTreeWalker(
+                            document.body, NodeFilter.SHOW_TEXT
+                        );
+                        var node;
+                        while (node = walker.nextNode()) {{
+                            if (node.textContent.trim() === '{year_str}') {{
+                                node.parentElement.click();
+                                return 'TreeWalker click: ' + node.parentElement.tagName;
+                            }}
+                        }}
+                        return 'not found';
+                    }}
+                """)
+                self.logger.info(f"Harris: year → {year_result}")
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(2000)
-                self.logger.info(f"Harris: year set to {year_str}")
 
-                page.select_option(MONTH_SEL, label=month_str)
+                # ── Select month via Telerik JavaScript API ────────────────
+                month_result = page.evaluate(f"""
+                    () => {{
+                        try {{
+                            var rcb = $find('{MONTH_CLIENT_ID}');
+                            if (rcb) {{
+                                var item = rcb.findItemByText('{month_str}');
+                                if (item) {{
+                                    item.select();
+                                    return 'Telerik API: selected ' + item.get_text();
+                                }}
+                                return 'Telerik item not found for: {month_str}';
+                            }}
+                        }} catch(e) {{
+                            return 'Telerik error: ' + e.message;
+                        }}
+
+                        // Fallback: TreeWalker click
+                        var walker = document.createTreeWalker(
+                            document.body, NodeFilter.SHOW_TEXT
+                        );
+                        var node;
+                        while (node = walker.nextNode()) {{
+                            if (node.textContent.trim() === '{month_str}') {{
+                                node.parentElement.click();
+                                return 'TreeWalker click: ' + node.parentElement.tagName;
+                            }}
+                        }}
+                        return 'not found';
+                    }}
+                """)
+                self.logger.info(f"Harris: month → {month_result}")
                 page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(2000)
-                self.logger.info(f"Harris: month set to {month_str}")
+                page.wait_for_timeout(3000)
 
                 body = page.inner_text('body')
                 self.logger.info(f"Harris body after selections: {body[:800]}")
@@ -77,7 +148,7 @@ class HarrisCountyScraper(BaseScraper):
             self.logger.info(f"Harris: {len(rows)} rows for {month_str} {year_str}")
 
             for row in rows:
-                if row.get('file_date') != target_file:
+                if _norm_date(row.get('file_date', '')) != target_file:
                     continue
                 detail = self._fetch_detail(row.get('detail_url', ''))
                 detail.update({
@@ -102,7 +173,7 @@ class HarrisCountyScraper(BaseScraper):
             or soup.find('table')
         )
         if not table:
-            self.logger.warning("Harris: no results table in HTML")
+            self.logger.warning("Harris: no results table found")
             return rows
         for tr in table.find_all('tr')[1:]:
             tds = tr.find_all('td')

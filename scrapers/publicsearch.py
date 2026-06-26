@@ -1,13 +1,13 @@
 """
 PublicSearch.us Scraper — Bexar, Dallas, Tarrant, Denton, Johnson
 
-What works:
-  - Advanced Search with 45-day date range
-  - Table parsing filtered by NOTICE/NTS doc types
-  - Playwright row-click to navigate to document detail for sale date
-    (links are React click handlers, not <a href> tags)
-
-Entity filter removes non-residential grantors.
+Key design decisions:
+  - Advanced Search, 45-day window
+  - Enrich (click doc → get sale date) per page before paginating
+    so we're always on the right results page when clicking cells
+  - URL check after click: if modal opened (URL unchanged), press Escape;
+    if navigated (URL changed), use go_back()
+  - APPOINTMENT OF TRUSTEE excluded from NTS matches
 """
 
 import re
@@ -16,49 +16,51 @@ from typing import List, Dict, Optional, Tuple
 from bs4 import BeautifulSoup
 from .base import BaseScraper
 
-# Homebuilders and non-residential entities to exclude
 EXCLUDE_KEYWORDS = [
     'GROUNDWATER', 'CONSERVATION DISTRICT', 'WATER DISTRICT',
-    'MUNICIPALITY', 'COUNTY DISTRICT', 'INTERNAL REVENUE',
-    'D R HORTON', 'DR HORTON', 'LENNAR HOMES', 'KB HOME',
-    'MERITAGE', 'PULTE', 'CENTEX', 'TAYLOR MORRISON',
-    'STARLIGHT HOMES', 'CONTINENTAL HOMES', 'BEAZER HOMES',
-    'CHESMAR HOMES', 'M/I HOMES', 'COVENTRY',
+    'INTERNAL REVENUE', 'D R HORTON', 'DR HORTON',
+    'LENNAR HOMES', 'KB HOME', 'MERITAGE', 'PULTE',
+    'CENTEX', 'TAYLOR MORRISON', 'STARLIGHT HOMES',
+    'CONTINENTAL HOMES', 'BEAZER HOMES', 'CHESMAR HOMES',
+    'M/I HOMES', 'COVENTRY', 'COUTO HOMES',
 ]
 
 def is_residential_lead(grantor: str) -> bool:
     g = grantor.upper()
-    for ex in EXCLUDE_KEYWORDS:
-        if ex in g:
-            return False
-    return True
+    return not any(ex in g for ex in EXCLUDE_KEYWORDS)
 
-NTS_DOC_TYPES = {
-    'NOTICE OF TRUSTEE', 'NOTICE OF SUBSTITUTE',
-    'SUBSTITUTE TRUSTEE', 'TRUSTEE SALE', 'NTS',
+# Only "NOTICE OF ..." docs — not plain APPOINTMENT/SUBSTITUTE docs
+NTS_DOC_KEYS = {
+    'NOTICE OF TRUSTEE',
+    'NOTICE OF SUBSTITUTE',
+    'TRUSTEE SALE',
+    'NTS',
 }
-NOTICE_EXCLUSIONS = {
-    'LIS PENDENS', 'HOSPITAL', 'COMPLETION',
-    'COMMENCEMENT', 'LIEN', 'CLAIM',
+NOTICE_BAD = {
+    'LIS PENDENS', 'HOSPITAL', 'LIEN', 'CLAIM',
+    'COMPLETION', 'COMMENCEMENT', 'APPOINTMENT',
 }
 
 def is_nts(doc_type: str) -> bool:
     dt = doc_type.upper().strip()
-    for kw in NTS_DOC_TYPES:
+
+    # Explicit exclusion first
+    if 'APPOINTMENT' in dt:
+        return False
+
+    for kw in NTS_DOC_KEYS:
         if kw in dt:
             return True
+
     if 'NOTICE' in dt:
-        for ex in NOTICE_EXCLUSIONS:
-            if ex in dt:
+        for bad in NOTICE_BAD:
+            if bad in dt:
                 return False
+        # Plain 'NOTICE' or any notice with TRUSTEE/SUBSTITUTE
         if dt == 'NOTICE' or 'TRUSTEE' in dt or 'SUBSTITUTE' in dt:
             return True
+
     return False
-
-
-def to_mddyyyy(iso: str) -> str:
-    parts = iso.split('-')
-    return f"{parts[1]}/{parts[2]}/{parts[0]}"
 
 
 class PublicSearchScraper(BaseScraper):
@@ -95,7 +97,6 @@ class PublicSearchScraper(BaseScraper):
                 page = context.new_page()
                 page.set_default_timeout(30_000)
 
-                # ── Advanced Search ────────────────────────────────────────
                 self.logger.info(f"{self.county}: loading advanced search...")
                 page.goto(self.base_url)
                 page.wait_for_load_state('networkidle')
@@ -105,22 +106,22 @@ class PublicSearchScraper(BaseScraper):
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(1000)
 
-                # ── Fill date range ────────────────────────────────────────
+                # Fill date range
                 for s, e in [
-                    ('input[id*="start" i]',           'input[id*="end" i]'),
-                    ('input[placeholder*="Start" i]',   'input[placeholder*="End" i]'),
-                    ('input[aria-label*="Start" i]',    'input[aria-label*="End" i]'),
+                    ('input[id*="start" i]',          'input[id*="end" i]'),
+                    ('input[placeholder*="Start" i]',  'input[placeholder*="End" i]'),
+                    ('input[aria-label*="Start" i]',   'input[aria-label*="End" i]'),
                 ]:
                     try:
                         if page.locator(s).count() > 0 and page.locator(e).count() > 0:
                             page.fill(s, start_fmt)
                             page.fill(e, end_fmt)
-                            self.logger.info(f"{self.county}: filled date range {start_fmt}→{end_fmt}")
+                            self.logger.info(f"{self.county}: date range {start_fmt}→{end_fmt}")
                             break
                     except Exception:
                         pass
 
-                # ── Search ─────────────────────────────────────────────────
+                # Search
                 for btn_sel in ['button[type="submit"]', 'button:has-text("Search")']:
                     try:
                         btn = page.locator(btn_sel).first
@@ -133,35 +134,25 @@ class PublicSearchScraper(BaseScraper):
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(3000)
 
-                # ── Collect NTS rows (paginate up to 15 pages) ─────────────
-                nts_rows = []
+                # ── Scrape and enrich per page ─────────────────────────────
+                # Enrich BEFORE paginating so we're always on the right page
+                # when clicking doc number cells.
+                records = []
                 for page_num in range(1, 16):
-                    html = page.content()
-                    rows = self._parse_nts_rows(html)
-                    nts_rows.extend(rows)
-                    self.logger.info(f"{self.county}: page {page_num} → {len(rows)} NTS rows")
+                    html     = page.content()
+                    nts_rows = self._parse_nts_rows(html)
+                    self.logger.info(f"{self.county}: page {page_num} → {len(nts_rows)} NTS rows")
+
+                    for row in nts_rows:
+                        grantor_full = row.get('first_name', '') + ' ' + row.get('last_name', '')
+                        if not is_residential_lead(grantor_full):
+                            self.logger.info(f"{self.county}: skip entity: {row.get('last_name')}")
+                            continue
+                        rec = self._fetch_sale_date(page, row)
+                        records.append(rec)
+
                     if not self._next_page(page):
                         break
-
-                self.logger.info(f"{self.county}: {len(nts_rows)} total NTS rows")
-
-                # ── Re-load results to click into each NTS document ────────
-                # Go back to results page
-                page.go_back()
-                page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(2000)
-
-                # ── Enrich each row with sale date ─────────────────────────
-                records = []
-                for row in nts_rows:
-                    if not is_residential_lead(
-                        row.get('first_name', '') + ' ' + row.get('last_name', '')
-                    ):
-                        self.logger.info(f"{self.county}: skipping entity: {row.get('last_name')}")
-                        continue
-
-                    rec = self._fetch_sale_date(page, row)
-                    records.append(rec)
 
                 browser.close()
                 return records
@@ -195,12 +186,11 @@ class PublicSearchScraper(BaseScraper):
                 if not cells or not any(c.strip() for c in cells):
                     continue
 
-                def cell(i):
-                    return cells[i].strip() if 0 <= i < len(cells) else ''
+                def cell(i, _cells=cells):
+                    return _cells[i].strip() if 0 <= i < len(_cells) else ''
 
                 doc_type = cell(di)
                 all_dts.add(doc_type)
-
                 if not is_nts(doc_type):
                     continue
 
@@ -208,7 +198,6 @@ class PublicSearchScraper(BaseScraper):
                 rec_date = cell(ri)
                 addr_raw = cell(ai)
                 doc_num  = cell(ni)
-
                 if not grantor:
                     continue
 
@@ -227,16 +216,19 @@ class PublicSearchScraper(BaseScraper):
                     'grantor': grantor,
                 })
 
-        self.logger.info(f"{self.county}: doc types: {all_dts}")
+        self.logger.info(f"{self.county}: doc types seen: {all_dts}")
         return rows
 
     # ── Sale date via Playwright click ────────────────────────────────────────
 
     def _fetch_sale_date(self, page, row: Dict) -> Dict:
         """
-        Click the doc number cell on the results page to navigate to
-        the document detail, then extract the sale date from the NTS text.
-        Playwright handles React click handlers that aren't <a href> links.
+        Click the doc number cell on the CURRENT results page.
+        Playwright handles React onClick without needing <a href>.
+        
+        After extracting sale date:
+          - If URL changed (navigated): go_back() to results
+          - If URL same (modal opened): press Escape to close modal
         """
         sale_date = ''
         address   = row.get('address', '')
@@ -246,75 +238,84 @@ class PublicSearchScraper(BaseScraper):
         grantor   = row.get('grantor', '')
 
         if not doc_num:
-            return self.build_record(**row, sale_date='')
+            return self.build_record(
+                first_name=row.get('first_name', ''), last_name=row.get('last_name', ''),
+                address=address, city=city, zip_code=zip_c,
+                file_date=row.get('file_date', ''), sale_date='',
+            )
 
         try:
-            # Find the cell containing this doc number and click it
-            cell_sel = f'td:text-is("{doc_num}")'
-            el = page.locator(cell_sel).first
+            for sel in [
+                f'td:text-is("{doc_num}")',
+                f'td:has-text("{doc_num}")',
+                f'[class*="docNumber" i]:has-text("{doc_num}")',
+            ]:
+                el = page.locator(sel).first
+                if el.count() > 0 and el.is_visible():
+                    results_url = page.url
 
-            if el.count() == 0:
-                # Try partial match on doc number
-                cell_sel = f'td:has-text("{doc_num}")'
-                el = page.locator(cell_sel).first
+                    el.scroll_into_view_if_needed()
+                    el.click()
+                    page.wait_for_load_state('networkidle')
+                    page.wait_for_timeout(2000)
 
-            if el.count() > 0:
-                el.click()
-                page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(2000)
-
-                detail_url = page.url
-                text = BeautifulSoup(page.content(), 'lxml').get_text(' ', strip=True)
-                self.logger.info(
-                    f"{self.county}: detail page for '{grantor}' "
-                    f"({len(text)} chars): {text[:300]}"
-                )
-
-                # Extract sale date
-                for pat in [
-                    r'Sale\s+Date[:\s]+(\d{1,2}/\d{1,2}/\d{4})',
-                    r'Date\s+of\s+Sale[:\s]+(\d{1,2}/\d{1,2}/\d{4})',
-                    r'first\s+Tuesday[^,\n]*,?\s*(\w+\s+\d{1,2},?\s*\d{4})',
-                    r'will\s+be\s+sold\s+on\s+(\w+\s+\d{1,2},?\s*\d{4})',
-                    r'sale\s+will\s+be\s+held[^,\n]*,?\s*(\w+\s+\d{1,2},?\s*\d{4})',
-                    r'(\d{1,2}/\d{1,2}/\d{4})(?=.*?(?:auction|sale))',
-                ]:
-                    m = re.search(pat, text, re.I | re.DOTALL)
-                    if m:
-                        sale_date = m.group(1).strip()
-                        self.logger.info(f"{self.county}: sale_date = {sale_date}")
-                        break
-
-                # Better address from document text
-                if not address:
-                    m2 = re.search(
-                        r'(\d+\s+[A-Z][A-Z0-9\s]+?'
-                        r'(?:ST|AVE|DR|RD|LN|BLVD|CT|WAY|PL|CIR|TRAIL|PKWY|LOOP|HWY)[A-Z\s\.]*?)'
-                        r',?\s+([A-Z][A-Z\s]+?),?\s+TX\s*(\d{5})',
-                        text, re.I
+                    new_url = page.url
+                    text    = BeautifulSoup(page.content(), 'lxml').get_text(' ', strip=True)
+                    self.logger.info(
+                        f"{self.county}: detail '{grantor}' → {new_url} "
+                        f"({len(text)} chars): {text[:300]}"
                     )
-                    if m2:
-                        address = m2.group(1).strip().title()
-                        city    = m2.group(2).strip().title()
-                        zip_c   = m2.group(3)
 
-                # Go back to results
-                page.go_back()
-                page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(1500)
+                    # Extract sale date from NTS document text
+                    for pat in [
+                        r'Sale\s+Date[:\s]+(\d{1,2}/\d{1,2}/\d{4})',
+                        r'Date\s+of\s+Sale[:\s]+(\d{1,2}/\d{1,2}/\d{4})',
+                        r'first\s+Tuesday[^,\n]*,?\s*(\w+\s+\d{1,2},?\s*\d{4})',
+                        r'will\s+be\s+sold\s+on\s+(\w+\s+\d{1,2},?\s*\d{4})',
+                        r'sale\s+will\s+be\s+held[^,\n]*,?\s*(\w+\s+\d{1,2},?\s*\d{4})',
+                    ]:
+                        m = re.search(pat, text, re.I | re.DOTALL)
+                        if m:
+                            sale_date = m.group(1).strip()
+                            self.logger.info(f"{self.county}: sale_date = {sale_date}")
+                            break
+
+                    # Try to get address from doc text if missing
+                    if not address:
+                        m2 = re.search(
+                            r'(\d+\s+[A-Z][A-Z0-9\s]+?'
+                            r'(?:ST|AVE|DR|RD|LN|BLVD|CT|WAY|PL|CIR|TRAIL|PKWY|LOOP|HWY)'
+                            r'[A-Z\s\.]*?),?\s+([A-Z][A-Z\s]+?),?\s+TX\s*(\d{5})',
+                            text, re.I
+                        )
+                        if m2:
+                            address = m2.group(1).strip().title()
+                            city    = m2.group(2).strip().title()
+                            zip_c   = m2.group(3)
+
+                    # Return to results
+                    if new_url != results_url:
+                        # Navigated to a new page — go_back() works
+                        page.go_back()
+                        page.wait_for_load_state('networkidle')
+                        page.wait_for_timeout(1500)
+                    else:
+                        # Modal/drawer opened (URL unchanged) — close with Escape
+                        page.keyboard.press('Escape')
+                        page.wait_for_timeout(500)
+
+                    break  # done with this row
 
             else:
-                self.logger.warning(f"{self.county}: could not find cell for doc '{doc_num}'")
+                self.logger.warning(f"{self.county}: cell not found for doc '{doc_num}'")
 
         except Exception as e:
-            self.logger.warning(f"{self.county}: click detail error: {e}")
+            self.logger.warning(f"{self.county}: detail error '{grantor}': {e}")
 
         return self.build_record(
-            first_name=row.get('first_name', ''),
-            last_name=row.get('last_name', ''),
+            first_name=row.get('first_name', ''), last_name=row.get('last_name', ''),
             address=address, city=city, zip_code=zip_c,
-            file_date=row.get('file_date', ''),
-            sale_date=self._fmt(sale_date),
+            file_date=row.get('file_date', ''), sale_date=self._fmt(sale_date),
         )
 
     # ── Pagination ────────────────────────────────────────────────────────────
@@ -325,8 +326,8 @@ class PublicSearchScraper(BaseScraper):
             'a:has-text("Next")',
             '[aria-label="Next"]',
             '[aria-label="Next page"]',
-            'li:not(.disabled) a[rel="next"]',
-            'li:not([class*="disabled"]) a:has-text("›")',
+            'li:not(.disabled) a:has-text("›")',
+            '[class*="next" i]:not([disabled]):not([class*="disabled" i])',
         ]:
             try:
                 el = page.locator(sel).first
