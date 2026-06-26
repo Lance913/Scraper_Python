@@ -1,9 +1,7 @@
 """
 Harris County Foreclosure Scraper
-Portal: https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx
-
-Uses TreeWalker to find exact text nodes for year/month,
-then force-clicks the parent element to bypass CSS visibility.
+TreeWalker confirmed year/month are in <OPTION> elements (standard <select>).
+Fix: use page.select_option() to set the dropdowns properly.
 """
 
 import re
@@ -21,24 +19,6 @@ MONTH_NAMES = {
     5: 'May',     6: 'June',     7: 'July',      8: 'August',
     9: 'September', 10: 'October', 11: 'November', 12: 'December',
 }
-
-JS_CLICK_TEXT = """
-    (text) => {
-        // TreeWalker finds exact text nodes regardless of element tag
-        const walker = document.createTreeWalker(
-            document.body, NodeFilter.SHOW_TEXT
-        );
-        let node;
-        while (node = walker.nextNode()) {
-            if (node.textContent.trim() === text) {
-                const el = node.parentElement;
-                el.click();
-                return el.tagName + '|' + el.className + '|' + el.id;
-            }
-        }
-        return null;
-    }
-"""
 
 
 class HarrisCountyScraper(BaseScraper):
@@ -70,30 +50,77 @@ class HarrisCountyScraper(BaseScraper):
                 page.wait_for_load_state('networkidle')
                 page.wait_for_timeout(1000)
 
-                # ── Click year via TreeWalker ──────────────────────────────
-                year_result = page.evaluate(JS_CLICK_TEXT, year_str)
-                self.logger.info(f"Harris: year click → {year_result}")
-                page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(1500)
+                # ── Inspect all <select> elements ──────────────────────────
+                select_info = page.evaluate("""
+                    () => {
+                        return Array.from(document.querySelectorAll('select')).map((s, i) => ({
+                            index: i,
+                            id: s.id,
+                            name: s.name,
+                            options: Array.from(s.options).map(o => o.text.trim()).slice(0, 6)
+                        }));
+                    }
+                """)
+                self.logger.info(f"Harris selects: {select_info}")
 
-                # ── Click month via TreeWalker ─────────────────────────────
-                month_result = page.evaluate(JS_CLICK_TEXT, month_str)
-                self.logger.info(f"Harris: month click → {month_result}")
-                page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(1500)
+                # ── Select year ────────────────────────────────────────────
+                year_done = False
+                for info in select_info:
+                    if year_str in info['options']:
+                        sel = f"select#{info['id']}" if info['id'] else f"select[name='{info['name']}']" if info['name'] else f"select:nth-of-type({info['index']+1})"
+                        try:
+                            page.select_option(sel, label=year_str)
+                            page.wait_for_load_state('networkidle')
+                            page.wait_for_timeout(1500)
+                            self.logger.info(f"Harris: selected year via '{sel}'")
+                            year_done = True
+                            break
+                        except Exception as e:
+                            self.logger.warning(f"Harris: year select error on '{sel}': {e}")
 
-                # ── Fallback: force-click via Playwright Locator ───────────
-                if not month_result:
-                    try:
-                        page.locator(f'text="{month_str}"').first.click(force=True)
-                        page.wait_for_load_state('networkidle')
-                        page.wait_for_timeout(1500)
-                        self.logger.info(f"Harris: month force-clicked via Locator")
-                    except Exception as e:
-                        self.logger.warning(f"Harris: force-click also failed: {e}")
+                if not year_done:
+                    # Fallback: try all selects
+                    for sel_str in ['select']:
+                        try:
+                            page.select_option(sel_str, label=year_str)
+                            page.wait_for_load_state('networkidle')
+                            page.wait_for_timeout(1500)
+                            self.logger.info("Harris: year selected via generic select")
+                            year_done = True
+                            break
+                        except Exception:
+                            pass
+
+                # Re-inspect selects after year selection (month select may update)
+                select_info2 = page.evaluate("""
+                    () => {
+                        return Array.from(document.querySelectorAll('select')).map((s, i) => ({
+                            index: i,
+                            id: s.id,
+                            name: s.name,
+                            options: Array.from(s.options).map(o => o.text.trim()).slice(0, 15)
+                        }));
+                    }
+                """)
+                self.logger.info(f"Harris selects after year: {select_info2}")
+
+                # ── Select month ───────────────────────────────────────────
+                month_done = False
+                for info in select_info2:
+                    if month_str in info['options']:
+                        sel = f"select#{info['id']}" if info['id'] else f"select[name='{info['name']}']" if info['name'] else f"select:nth-of-type({info['index']+1})"
+                        try:
+                            page.select_option(sel, label=month_str)
+                            page.wait_for_load_state('networkidle')
+                            page.wait_for_timeout(1500)
+                            self.logger.info(f"Harris: selected month via '{sel}'")
+                            month_done = True
+                            break
+                        except Exception as e:
+                            self.logger.warning(f"Harris: month select error on '{sel}': {e}")
 
                 body = page.inner_text('body')
-                self.logger.info(f"Harris body after selections: {body[:600]}")
+                self.logger.info(f"Harris body after selections: {body[:800]}")
 
                 content = page.content()
                 browser.close()
@@ -128,7 +155,7 @@ class HarrisCountyScraper(BaseScraper):
             or soup.find('table')
         )
         if not table:
-            self.logger.warning("Harris: no results table found in HTML")
+            self.logger.warning("Harris: no results table in HTML")
             return rows
         for tr in table.find_all('tr')[1:]:
             tds = tr.find_all('td')
