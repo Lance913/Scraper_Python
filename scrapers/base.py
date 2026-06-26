@@ -110,4 +110,5 @@ class BaseScraper:
             'county':      self.county,
             'file_date':   kwargs.get('file_date', ''),
             'sale_date':   kwargs.get('sale_date', ''),
+            'doc_id':      kwargs.get('doc_id', ''),
         }
