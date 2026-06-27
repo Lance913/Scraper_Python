@@ -1,22 +1,13 @@
 """
-Probe v11 — confirm the direct Foreclosures results URL, parse the new table
-schema, check pagination, and OCR a real Notice of Foreclosure to see where the
-OWNER NAME sits (the only field the results table doesn't give us).
+Probe v12 — find the JSON API behind the Foreclosures results page.
 
-What v10 established:
-  - Department=Foreclosures (department=FC) returns a foreclosure-only table:
-      Doc Type | Recorded Date | Sale Date | Doc Number | Remarks | Property Address
-    The Sale Date AND full street Property Address come straight from the table
-    (no OCR needed). Only the owner/grantor NAME is missing from the table.
-  - Results are query-driven:
-      {base}/results?department=FC&recordedDateRange=YYYYMMDD,YYYYMMDD&searchType=advancedSearch
-
-v11:
-  1. Navigate DIRECTLY to that results URL (no form interaction).
-  2. Parse the new table schema; print several rows.
-  3. Inspect pagination (controls + any total-count text).
-  4. Click the first NOTICE OF FORECLOSE doc, OCR its pages -> find the owner name.
+The results page is a React app; it fetches rows from a backend API. If that API
+returns the owner/grantor NAME alongside address + sale date, we can skip OCR
+entirely and get complete leads fast. This probe captures every JSON/XHR
+response while loading the FC results URL and dumps the most promising payload's
+structure (keys + a sample record).
 """
+import json
 import logging
 import os
 import sys
@@ -30,41 +21,51 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [PS] %(message)s')
 log = logging.getLogger()
 
 COUNTY_SLUG = "bexar"
-COUNTY_NAME = "Bexar"
 BASE = f"https://{COUNTY_SLUG}.tx.publicsearch.us"
 TODAY = date(2026, 6, 27)
 WINDOW_DAYS = 120
 
-
-def is_doc_image(url):
-    return ('/files/documents/' in url and '/images/' in url and '.png' in url)
+captured = []  # (url, status, content_type, body_text)
 
 
-def parse_fc_table(page):
-    """Parse the Foreclosures results table into row dicts using its real headers."""
-    return page.evaluate("""() => {
-        const out = [];
-        for (const t of document.querySelectorAll('table')) {
-            const heads = Array.from(t.querySelectorAll('th')).map(h => (h.textContent||'').trim().toLowerCase());
-            const idx = name => heads.findIndex(h => h.includes(name));
-            const di = idx('doc type'), rd = idx('recorded'), sd = idx('sale date'),
-                  dn = idx('doc number'), rm = idx('remark'), pa = idx('property address');
-            if (di < 0) continue;
-            for (const tr of Array.from(t.querySelectorAll('tr')).slice(1)) {
-                const c = Array.from(tr.querySelectorAll('td')).map(td => (td.textContent||'').trim());
-                if (!c.length) continue;
-                out.push({
-                    doc_type: c[di]||'', recorded: c[rd]||'', sale_date: c[sd]||'',
-                    doc_number: c[dn]||'', remarks: c[rm]||'', property_address: c[pa]||'',
-                });
-            }
-        }
-        return out;
-    }""")
+def on_response(resp):
+    try:
+        ct = resp.headers.get('content-type', '')
+        url = resp.url
+        # Capture JSON / api-looking responses; skip static assets + images.
+        if ('application/json' in ct or '/api' in url or '/search' in url) and \
+           '.png' not in url and '.js' not in url and '.css' not in url:
+            body = resp.text()
+            captured.append((url, resp.status, ct, body[:200000]))
+    except Exception:
+        pass
+
+
+def summarize(obj, depth=0, maxd=3):
+    """Return a compact shape description of a JSON object."""
+    pad = '  ' * depth
+    if depth > maxd:
+        return pad + '...'
+    if isinstance(obj, dict):
+        lines = []
+        for k, v in list(obj.items())[:40]:
+            if isinstance(v, (dict, list)):
+                lines.append(f"{pad}{k}:")
+                lines.append(summarize(v, depth + 1, maxd))
+            else:
+                sv = repr(v)
+                if len(sv) > 80:
+                    sv = sv[:80] + '...'
+                lines.append(f"{pad}{k}: {sv}")
+        return '\n'.join(lines)
+    if isinstance(obj, list):
+        if not obj:
+            return pad + '[] (empty)'
+        return f"{pad}[list len={len(obj)}], first item:\n" + summarize(obj[0], depth + 1, maxd)
+    return pad + repr(obj)
 
 
 def main():
-    captured = []
     s = (TODAY - timedelta(days=WINDOW_DAYS)).strftime('%Y%m%d')
     e = TODAY.strftime('%Y%m%d')
     results_url = (f"{BASE}/results?department=FC"
@@ -81,87 +82,55 @@ def main():
         page = ctx.new_page()
         page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page.set_default_timeout(30000)
-        page.on('response', lambda r: captured.append(r.url) if is_doc_image(r.url) else None)
+        page.on('response', on_response)
 
-        # Need a session first (cookies), then go straight to the results URL.
-        log.info("Warm up session at base ...")
+        log.info("Warm up session ...")
         page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
-        log.info(f"Direct nav: {results_url}")
-        page.goto(results_url); page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
-        log.info(f"landed: {page.url}")
+        log.info(f"Nav to FC results: {results_url}")
+        page.goto(results_url); page.wait_for_load_state('networkidle'); page.wait_for_timeout(5000)
 
-        rows = parse_fc_table(page)
-        log.info(f"parsed {len(rows)} rows from FC table")
-        for r in rows[:8]:
-            log.info(f"  {r}")
+        log.info(f"Captured {len(captured)} JSON/API responses:")
+        for url, status, ct, body in captured:
+            log.info(f"  [{status}] {ct[:30]} {url[:160]}  (len={len(body)})")
 
-        # Pagination / total-count inspection.
-        pag = page.evaluate("""() => {
-            const txt = (document.body.innerText||'');
-            const m = txt.match(/([\\d,]+)\\s+(results|records|documents)/i);
-            const btns = Array.from(document.querySelectorAll('button,a,[role="button"]'))
-              .map(b => ((b.textContent||'').trim() + '|' + (b.getAttribute('aria-label')||'')))
-              .filter(s => /next|prev|page|\\u203a|\\u2039|\\d+\\s*of\\s*\\d+/i.test(s)).slice(0, 25);
-            return { count_phrase: m ? m[0] : '(none)', controls: btns };
-        }""")
-        log.info(f"count phrase: {pag['count_phrase']}")
-        log.info(f"pagination controls: {pag['controls']}")
+        # Find the payload that most likely holds the result rows.
+        best = None
+        for url, status, ct, body in captured:
+            low = body.lower()
+            if any(k in low for k in ['grantor', 'grantee', 'saledate', 'sale_date',
+                                      'docnumber', 'doc_number', 'instrument', 'searchresult']):
+                best = (url, body)
+                break
+        if not best and captured:
+            best = max(captured, key=lambda c: len(c[3]))[0:1] + (max(captured, key=lambda c: len(c[3]))[3],)
 
-        # OCR the first NOTICE OF FORECLOSE doc to locate the owner name.
-        nts = next((r for r in rows if 'FORECLOS' in r['doc_type'].upper()
-                    or 'TRUSTEE' in r['doc_type'].upper()), None)
-        if not nts:
-            log.info("no foreclosure row to OCR"); browser.close(); return
-        doc_num = nts['doc_number']
-        log.info(f"OCR target: doc={doc_num} addr={nts['property_address']!r} sale={nts['sale_date']!r}")
+        if not best:
+            log.info("No JSON payload captured."); browser.close(); return
 
-        captured.clear()
-        clicked = False
-        for sel in [f'td:text-is("{doc_num}")', f'td:has-text("{doc_num}")']:
-            el = page.locator(sel).first
-            if el.count() > 0 and el.is_visible():
-                el.scroll_into_view_if_needed(); el.click(); clicked = True; break
-        if not clicked:
-            log.info("could not click doc cell"); browser.close(); return
-
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(6000)
-        log.info(f"doc page: {page.url}")
+        url, body = best
+        log.info(f"===== MOST PROMISING PAYLOAD =====\n{url}")
         try:
-            for _ in range(4):
-                nxt = page.locator('button:has-text("Next in Book"), [aria-label*="next" i]').first
-                if nxt.count() > 0 and nxt.is_visible():
-                    nxt.click(); page.wait_for_timeout(2000)
-        except Exception:
-            pass
-        page.wait_for_timeout(2000)
-
-        log.info(f"captured {len(captured)} image URL(s)")
-        os.makedirs('/tmp/ps', exist_ok=True)
-        saved, seen = [], set()
-        for u in captured:
-            k = u.split('?')[0]
-            if k in seen:
-                continue
-            seen.add(k)
-            try:
-                body = ctx.request.get(u).body()
-                fn = f"/tmp/ps/{len(saved)}.png"
-                with open(fn, 'wb') as f:
-                    f.write(body)
-                saved.append(fn)
-                log.info(f"  saved page {len(saved)}: {len(body)} bytes hdr={body[:4]!r}")
-            except Exception as ex:
-                log.info(f"  dl err {str(ex)[:60]}")
-
-        import pytesseract
-        from PIL import Image
-        log.info("===== REAL NOTICE OF FORECLOSURE OCR =====")
-        for fn in saved[:3]:
-            txt = pytesseract.image_to_string(Image.open(fn))
-            log.info(f"----- {fn} ({len(txt)} chars) -----")
-            for ln in txt.split('\n'):
-                if ln.strip():
-                    log.info(f"  | {ln.strip()}")
+            data = json.loads(body)
+            log.info("----- SHAPE -----")
+            for ln in summarize(data).split('\n'):
+                log.info(ln)
+            # Try to print one full result record if we can find a list of rows.
+            def find_rows(o):
+                if isinstance(o, list) and o and isinstance(o[0], dict):
+                    return o
+                if isinstance(o, dict):
+                    for v in o.values():
+                        r = find_rows(v)
+                        if r:
+                            return r
+                return None
+            rows = find_rows(data)
+            if rows:
+                log.info(f"----- SAMPLE RECORD (of {len(rows)}) -----")
+                log.info(json.dumps(rows[0], indent=2)[:4000])
+        except Exception as ex:
+            log.info(f"JSON parse failed ({ex}); raw head:")
+            log.info(body[:3000])
 
         browser.close()
 
