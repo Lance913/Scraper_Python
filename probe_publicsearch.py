@@ -1,26 +1,30 @@
 """
-Probe v7 — OCR a REAL NTS document from publicsearch to learn its layout.
+Probe v9 — INTROSPECT the publicsearch advanced-search form.
 
-The point of this probe: see the exact text layout of a publicsearch Notice of
-Trustee Sale so we can write publicsearch_extract.py (sale date + owner + address).
+Why: v8 proved that (a) filling input[id*="docType"] is a no-op (the results URL
+carried no doc-type param — only recordedDateRange), and (b) a date-only search
+returns an unstable, ~50-row single page, so real Notice of Trustee Sale docs
+only show up by luck. We also learned doc_type 'NOTICE' over-matches (a Water
+Code statutory notice came back as NTS).
 
-v6's bug: it looked for one hard-coded doc number and, if that doc wasn't on
-results page 1, fell back to clicking the FIRST doc-number cell on the page —
-which grabbed an unrelated UCC filing, not an NTS.
-
-v7 fix: reuse the scraper's own NTS detection. We instantiate the real
-PublicSearchScraper, run its _parse_nts_rows() on each results page (so the probe
-clicks EXACTLY the rows the scraper considers NTS), paginate until we find one,
-prefer an individual/residential lead, click that doc's cell, capture the PNG
-page images, OCR them, and print the layout.
+Goal of v9: discover how publicsearch actually filters by document type so the
+scraper can request trustee-sale docs directly. We:
+  1. Dump every input/select/button/combobox on /search/advanced (id, name,
+     placeholder, aria, role) + all <select> options + visible label text.
+  2. Try to interact with the document-type control, type 'TRUSTEE', and capture
+     the autocomplete options that appear (the exact NTS doc-type names).
+  3. If we can select a doc type, submit and log the resulting results URL (to
+     capture the correct query param) + the doc types returned.
 """
-import logging, os, sys
+import json
+import logging
+import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import date, timedelta
 from playwright.sync_api import sync_playwright
-from scrapers.publicsearch import PublicSearchScraper, is_residential_lead
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [PS] %(message)s')
 log = logging.getLogger()
@@ -28,87 +32,34 @@ log = logging.getLogger()
 COUNTY_SLUG = "bexar"
 COUNTY_NAME = "Bexar"
 BASE = f"https://{COUNTY_SLUG}.tx.publicsearch.us"
-TODAY = date(2026, 6, 27)        # repo runs on GH Actions; pin a date for reproducibility
-WINDOW_DAYS = 120                # wide window so we catch some NTS volume
-MAX_PAGES = 6
+TODAY = date(2026, 6, 27)
+WINDOW_DAYS = 120
 
-
-def is_doc_image(url: str) -> bool:
-    return ('/files/documents/' in url and '/images/' in url and '.png' in url)
-
-
-def run_search(page, start_fmt, end_fmt, keyword=None):
-    """Fill the advanced-search form (optionally with a doc-type keyword) and
-    submit. Logs whether each field actually filled + the resulting URL and the
-    total number of result rows, so we can tell if the filters applied."""
-    page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
-    page.goto(BASE + '/search/advanced')
-    page.wait_for_load_state('networkidle'); page.wait_for_timeout(1200)
-
-    kw_filled = False
-    if keyword:
-        # v4 proved NTS docs surface via a free-text / doc-type keyword field.
-        for sel in ['input[id*="docType" i]', 'input[placeholder*="Type" i]',
-                    'input[id*="searchText" i]', 'input[placeholder*="eyword" i]',
-                    'input[type="text"]']:
-            loc = page.locator(sel).first
-            if loc.count() > 0 and loc.is_visible():
-                loc.fill(keyword); kw_filled = True
-                log.info(f"keyword {keyword!r} -> {sel}")
-                page.wait_for_timeout(1000)
-                try:
-                    opt = page.locator('[role="option"], li:has-text("TRUSTEE")').first
-                    if opt.count() > 0 and opt.is_visible():
-                        opt.click(); log.info("selected autocomplete option")
-                except Exception:
-                    pass
-                break
-        if not kw_filled:
-            log.info("keyword field NOT found")
-
-    date_filled = False
-    if page.locator('input[id*="start" i]').count() > 0:
-        page.fill('input[id*="start" i]', start_fmt)
-        page.fill('input[id*="end" i]', end_fmt)
-        date_filled = True
-    log.info(f"date_filled={date_filled} ({start_fmt}->{end_fmt})")
-
-    for bsel in ['button[type="submit"]', 'button:has-text("Search")']:
-        b = page.locator(bsel).first
-        if b.count() > 0:
-            b.click(); break
-    page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
-
-    n_rows = page.locator('table tr').count()
-    log.info(f"results URL: {page.url}")
-    log.info(f"total table rows on page 1: {n_rows}")
-
-
-def pick_nts_row(scraper, page):
-    """Run the scraper's own NTS parser on the current results page.
-
-    Returns the NTS row to click — preferring an individual/residential lead
-    (is_residential_lead True) over a builder/HOA/fund, since the whole point is
-    to see an individual homeowner NTS layout. Returns None if no NTS rows here.
-    """
-    rows = scraper._parse_nts_rows(page.content())
-    rows = [r for r in rows if r.get('doc_number')]
-    if not rows:
-        return None
-    residential = [r for r in rows if is_residential_lead(r.get('grantor', ''))]
-    chosen = (residential or rows)[0]
-    log.info(
-        f"Chosen NTS row: grantor={chosen.get('grantor')!r} "
-        f"doc={chosen.get('doc_number')!r} "
-        f"({'individual' if residential else 'entity (no individual on this page)'})"
-    )
-    return chosen
+DUMP_JS = """() => {
+  const dump = el => ({
+    tag: el.tagName,
+    type: el.getAttribute('type') || '',
+    id: el.id || '',
+    name: el.getAttribute('name') || '',
+    placeholder: el.getAttribute('placeholder') || '',
+    aria: el.getAttribute('aria-label') || '',
+    role: el.getAttribute('role') || '',
+    text: (el.textContent || '').trim().slice(0, 40),
+  });
+  const controls = Array.from(document.querySelectorAll(
+    'input,select,textarea,button,[role="combobox"],[role="listbox"],[role="button"]'
+  )).map(dump);
+  const selects = Array.from(document.querySelectorAll('select')).map(s => ({
+    id: s.id, name: s.name,
+    options: Array.from(s.options).map(o => o.text).slice(0, 60),
+  }));
+  const labels = Array.from(document.querySelectorAll('label'))
+    .map(l => l.textContent.trim()).filter(Boolean).slice(0, 40);
+  return { controls, selects, labels };
+}"""
 
 
 def main():
-    captured = []
-    scraper = PublicSearchScraper(COUNTY_SLUG, COUNTY_NAME)
-
     start_fmt = (TODAY - timedelta(days=WINDOW_DAYS)).strftime('%m/%d/%Y')
     end_fmt = TODAY.strftime('%m/%d/%Y')
 
@@ -125,90 +76,61 @@ def main():
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         )
         page.set_default_timeout(30000)
-        page.on('response', lambda r: captured.append(r.url) if is_doc_image(r.url) else None)
 
-        def search_and_find(keyword):
-            """Run a search then paginate looking for an NTS row the scraper
-            recognizes. Returns the chosen row dict or None."""
-            log.info(f"=== SEARCH (keyword={keyword!r}) {COUNTY_NAME} ===")
-            run_search(page, start_fmt, end_fmt, keyword=keyword)
-            for page_num in range(1, MAX_PAGES + 1):
-                log.info(f"--- results page {page_num} ---")
-                row = pick_nts_row(scraper, page)
-                if row:
-                    return row
-                if not scraper._next_page(page):
-                    log.info("No more results pages.")
-                    break
-            return None
+        log.info(f"Loading {BASE}/search/advanced ...")
+        page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
+        page.goto(BASE + '/search/advanced')
+        page.wait_for_load_state('networkidle'); page.wait_for_timeout(1500)
 
-        # Keyword-filtered search first (v4 proved this surfaces NTS docs),
-        # then fall back to a plain date-range search.
-        chosen = search_and_find('NOTICE OF TRUSTEE')
-        if not chosen:
-            log.info("Keyword search found no NTS rows; retrying date-only.")
-            chosen = search_and_find(None)
-
-        if not chosen:
-            log.info("No NTS row found to OCR."); browser.close(); return
-
-        doc_num = chosen['doc_number']
-        log.info(f"Clicking NTS doc cell {doc_num!r} ...")
-        captured.clear()
-        clicked = False
-        for sel in [
-            f'td:text-is("{doc_num}")',
-            f'td:has-text("{doc_num}")',
-            f'[class*="docNumber" i]:has-text("{doc_num}")',
-        ]:
-            el = page.locator(sel).first
-            if el.count() > 0 and el.is_visible():
-                el.scroll_into_view_if_needed(); el.click(); clicked = True; break
-        if not clicked:
-            log.info(f"Could not click doc cell {doc_num!r}"); browser.close(); return
-
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(6000)
-        log.info(f"Doc page: {page.url}")
-
-        # The viewer may only load page-1 image initially; nudge it to load the rest.
-        try:
-            for _ in range(3):
-                nxt = page.locator(
-                    'button:has-text("Next in Book"), [aria-label*="next" i]'
-                ).first
-                if nxt.count() > 0 and nxt.is_visible():
-                    nxt.click(); page.wait_for_timeout(2000)
-        except Exception:
-            pass
-        page.wait_for_timeout(2000)
-
-        log.info(f"Captured {len(captured)} image URL(s)")
-        os.makedirs('/tmp/ps', exist_ok=True)
-        saved, seen = [], set()
-        for u in captured:
-            k = u.split('?')[0]
-            if k in seen:
+        # 1) Dump the whole form.
+        info = page.evaluate(DUMP_JS)
+        log.info("===== FORM LABELS =====")
+        log.info(json.dumps(info['labels'], indent=0))
+        log.info("===== SELECT ELEMENTS (id / options) =====")
+        for s in info['selects']:
+            log.info(f"select id={s['id']!r} name={s['name']!r} options={s['options']}")
+        log.info("===== CONTROLS (input/button/combobox) =====")
+        for c in info['controls']:
+            # skip pure-icon buttons with no useful identity
+            if not any([c['id'], c['name'], c['placeholder'], c['aria'], c['role'], c['text']]):
                 continue
-            seen.add(k)
-            try:
-                body = ctx.request.get(u).body()
-                fn = f"/tmp/ps/{len(saved)}.png"
-                with open(fn, 'wb') as f:
-                    f.write(body)
-                saved.append(fn)
-                log.info(f"  saved page {len(saved)}: {len(body)} bytes  hdr={body[:4]!r}")
-            except Exception as e:
-                log.info(f"  dl err {str(e)[:60]}")
+            log.info(
+                f"{c['tag']:8} type={c['type']:10} id={c['id']!r} name={c['name']!r} "
+                f"ph={c['placeholder']!r} aria={c['aria']!r} role={c['role']!r} text={c['text']!r}"
+            )
 
-        import pytesseract
-        from PIL import Image
-        log.info(f"===== NTS DOCUMENT OCR ({COUNTY_NAME}, grantor={chosen.get('grantor')!r}) =====")
-        for fn in saved[:3]:
-            txt = pytesseract.image_to_string(Image.open(fn))
-            log.info(f"----- {fn} ({len(txt)} chars) -----")
-            for ln in txt.split('\n'):
-                if ln.strip():
-                    log.info(f"  | {ln.strip()}")
+        # 2) Try to interact with a document-type control and capture options.
+        log.info("===== TRY DOC-TYPE AUTOCOMPLETE ('TRUSTEE') =====")
+        doc_type_selectors = [
+            'input[id*="docType" i]', 'input[placeholder*="document type" i]',
+            'input[placeholder*="doc type" i]', 'input[aria-label*="document type" i]',
+            '[role="combobox"]', 'input[placeholder*="Type" i]',
+        ]
+        for sel in doc_type_selectors:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
+                log.info(f"interacting with {sel}")
+                try:
+                    loc.click()
+                    loc.fill('TRUSTEE')
+                    page.wait_for_timeout(1500)
+                    opts = page.evaluate("""() => Array.from(document.querySelectorAll(
+                        '[role="option"], [class*="option" i], li'
+                    )).map(o => (o.textContent||'').trim()).filter(t => t && t.length < 80).slice(0, 40)""")
+                    log.info(f"  autocomplete options after typing TRUSTEE: {opts}")
+                except Exception as e:
+                    log.info(f"  interact err: {str(e)[:80]}")
+                break
+        else:
+            log.info("no doc-type control found among selectors")
+
+        # 3) Also dump the page text near 'Document Type' to understand layout.
+        body_txt = page.evaluate(
+            "() => (document.body.innerText||'').split('\\n').map(s=>s.trim()).filter(Boolean).slice(0,80)"
+        )
+        log.info("===== ADVANCED-SEARCH PAGE TEXT (first 80 lines) =====")
+        for ln in body_txt:
+            log.info(f"  | {ln}")
 
         browser.close()
 
