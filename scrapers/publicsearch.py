@@ -37,9 +37,9 @@ from . import publicsearch_extract as pse
 # ── Tunables (env-overridable so the workflow can trade runtime for coverage) ──
 WINDOW_DAYS = int(os.environ.get('PUBLICSEARCH_WINDOW_DAYS', '45'))
 MAX_PAGES = int(os.environ.get('PUBLICSEARCH_MAX_PAGES', '40'))      # 50 rows/page
-OCR_BUDGET_SEC = int(os.environ.get('PUBLICSEARCH_OCR_BUDGET', '360'))  # per county
+OCR_BUDGET_SEC = int(os.environ.get('PUBLICSEARCH_OCR_BUDGET', '240'))  # per county
 OCR_MAX_DOCS = int(os.environ.get('PUBLICSEARCH_OCR_MAX', '150'))    # per county
-IMG_WAIT_MS = int(os.environ.get('PUBLICSEARCH_IMG_WAIT', '4000'))
+IMG_WAIT_MS = int(os.environ.get('PUBLICSEARCH_IMG_WAIT', '7000'))   # max wait for PNG
 
 # Builders / entities we never want as a lead (checked against the OCR'd name).
 EXCLUDE_KEYWORDS = [
@@ -245,9 +245,13 @@ class PublicSearchScraper(BaseScraper):
         """Open the doc page, grab the page-1 PNG, OCR it, parse the owner name."""
         try:
             captured.clear()
-            page.goto(f"{self.base_url}/doc/{doc_id_internal}")
-            page.wait_for_load_state('networkidle')
-            page.wait_for_timeout(IMG_WAIT_MS)
+            page.goto(f"{self.base_url}/doc/{doc_id_internal}", wait_until='domcontentloaded')
+            # Break as soon as the page-1 PNG response arrives (don't burn a fixed wait).
+            deadline = time.monotonic() + IMG_WAIT_MS / 1000
+            while time.monotonic() < deadline:
+                if any(is_doc_image(u) for u in captured):
+                    break
+                page.wait_for_timeout(250)
             png_url = next((u for u in captured if is_doc_image(u)), None)
             if not png_url:
                 return '', ''

@@ -77,6 +77,21 @@ def _first_person(raw):
     return re.sub(r'\s+', ' ', s).strip(' .,-')
 
 
+# Connector / boilerplate / OCR-noise tokens that are never part of a real name.
+JUNK_TOKENS = {
+    'THE', 'AND', 'OR', 'OF', 'A', 'AN', 'TO', 'ALL', 'SAID', 'ABOVE', 'NAMED',
+    'ABOVE-NAMED', 'UNKNOWN', 'OCCUPANT', 'OCCUPANTS', 'TENANT', 'TENANTS',
+    'ESTATE', 'HEIRS', 'DEFENDANT', 'DEFENDANTS', 'PLAINTIFF', 'GRANTOR',
+    'GRANTEE', 'MORTGAGOR', 'BORROWER', 'DEBTOR', 'TRUSTEE', 'TRUSTOR', 'MAKER',
+    'PAYEE', 'LENDER', 'SATX', 'TX', 'TEXAS', 'TPI', 'VNC', 'NA', 'TBD',
+}
+NAME_SUFFIXES = {'JR', 'SR', 'II', 'III', 'IV', 'V'}
+
+
+def _has_vowel(w):
+    return any(c in 'AEIOUaeiouY' for c in w)
+
+
 def looks_like_person(name):
     up = name.upper()
     if any(t in up for t in NON_OWNER_TOKENS):
@@ -84,8 +99,13 @@ def looks_like_person(name):
     words = name.split()
     if not (2 <= len(words) <= 5):
         return False
-    # At least two words that are real (>=2 alpha chars), i.e. not just initials.
-    real = [w for w in words if sum(c.isalpha() for c in w) >= 2]
+    if any(w.upper().strip('.') in JUNK_TOKENS for w in words):
+        return False
+    # Real name words: >=2 letters AND contain a vowel (kills OCR junk like "Vnc",
+    # "Tpi"); standalone initials ("D.") and suffixes ("Jr") don't count as real.
+    real = [w for w in words
+            if len(w.strip('.')) >= 2 and _has_vowel(w)
+            and w.upper().strip('.') not in NAME_SUFFIXES]
     if len(real) < 2:
         return False
     alpha_ratio = sum(c.isalpha() or c in " .'-" for c in name) / max(len(name), 1)
@@ -114,10 +134,14 @@ def split_name(full):
     if len(parts) == 1:
         return '', parts[0].title()
     first = parts[0].title()
-    # Last name = final token (skip a trailing standalone initial if present).
+    # Last name = final token, skipping a trailing suffix (Jr/Sr/III) or a
+    # standalone initial.
     last = parts[-1]
-    if len(last.replace('.', '')) <= 1 and len(parts) >= 3:
-        last = parts[-2]
+    i = len(parts) - 1
+    while i > 0 and (last.upper().strip('.') in NAME_SUFFIXES
+                     or len(last.replace('.', '')) <= 1):
+        i -= 1
+        last = parts[i]
     return first, last.title()
 
 
@@ -154,6 +178,13 @@ if __name__ == '__main__':
         'edwards': "Deed of Trust or Contract Lien executed by KURT WALLACE EDWARDS, securing the payment "
                    "of the indebtednesses in the original principal amount of $340,907.00",
         'bank_only': "Beneficiary: Wells Fargo Bank, National Association\nLENDER: Wilmington Savings Fund Society, FSB",
+        # Garbage parses observed in the Bexar dry-run — must now reject (-> '').
+        'junk_and': "Grantor: Blanca And",
+        'junk_above': "executed by The Above-Named",
+        'junk_vnc': "Grantor: Michael Vnc",
+        'junk_tpi': "Debtor(s): Cordova Tpi",
+        'junk_satx': "Grantor: San Satx",
+        'suffix_ok': "Grantor: John Smith Jr & Mary Smith",
     }
     for k, txt in SAMPLES.items():
         owner = parse_owner(txt)
