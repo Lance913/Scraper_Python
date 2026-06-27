@@ -1,20 +1,21 @@
 """
-Probe v10 — search the FORECLOSURES department and OCR a real Notice of Trustee Sale.
+Probe v11 — confirm the direct Foreclosures results URL, parse the new table
+schema, check pagination, and OCR a real Notice of Foreclosure to see where the
+OWNER NAME sits (the only field the results table doesn't give us).
 
-v9 introspection revealed the advanced-search form has a Department selector
-(button id='department', listbox id='department-listbox') whose options include
-"Foreclosures". The current scraper never sets it, so it searches the default
-"Land Records" department (department=RP) and only catches NTS docs by luck in a
-capped ~50-row sample.
+What v10 established:
+  - Department=Foreclosures (department=FC) returns a foreclosure-only table:
+      Doc Type | Recorded Date | Sale Date | Doc Number | Remarks | Property Address
+    The Sale Date AND full street Property Address come straight from the table
+    (no OCR needed). Only the owner/grantor NAME is missing from the table.
+  - Results are query-driven:
+      {base}/results?department=FC&recordedDateRange=YYYYMMDD,YYYYMMDD&searchType=advancedSearch
 
-v10:
-  1. Open Department -> select "Foreclosures".
-  2. Fill the recorded date range, search.
-  3. Log the results URL (capture the dept query param), total rows, doc types,
-     and pagination behavior.
-  4. Use the real scraper's _parse_nts_rows() to pick an NTS row (prefer an
-     individual/residential lead), click it, capture the PNG page images, OCR
-     them, and print the REAL Notice of Trustee Sale layout.
+v11:
+  1. Navigate DIRECTLY to that results URL (no form interaction).
+  2. Parse the new table schema; print several rows.
+  3. Inspect pagination (controls + any total-count text).
+  4. Click the first NOTICE OF FORECLOSE doc, OCR its pages -> find the owner name.
 """
 import logging
 import os
@@ -24,7 +25,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import date, timedelta
 from playwright.sync_api import sync_playwright
-from scrapers.publicsearch import PublicSearchScraper, is_residential_lead
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [PS] %(message)s')
 log = logging.getLogger()
@@ -34,60 +34,41 @@ COUNTY_NAME = "Bexar"
 BASE = f"https://{COUNTY_SLUG}.tx.publicsearch.us"
 TODAY = date(2026, 6, 27)
 WINDOW_DAYS = 120
-MAX_PAGES = 6
 
 
 def is_doc_image(url):
     return ('/files/documents/' in url and '/images/' in url and '.png' in url)
 
 
-def select_foreclosures_department(page):
-    """Open the Department combobox and choose 'Foreclosures'. Returns True/False."""
-    try:
-        btn = page.locator('button#department, #department').first
-        if btn.count() == 0:
-            log.info("department button not found")
-            return False
-        btn.click()
-        page.wait_for_timeout(800)
-        for sel in [
-            '#department-listbox [role="option"]:has-text("Foreclosures")',
-            '#department-listbox li:has-text("Foreclosures")',
-            '#department-listbox >> text="Foreclosures"',
-            '[role="option"]:has-text("Foreclosures")',
-            'li:has-text("Foreclosures")',
-        ]:
-            opt = page.locator(sel).first
-            if opt.count() > 0 and opt.is_visible():
-                opt.click()
-                page.wait_for_timeout(600)
-                cur = page.locator('button#department, #department').first.inner_text()
-                log.info(f"department now: {cur!r}")
-                return 'foreclos' in cur.lower()
-        log.info("Foreclosures option not found in listbox")
-    except Exception as e:
-        log.info(f"dept select err: {str(e)[:100]}")
-    return False
-
-
-def pick_nts_row(scraper, page):
-    rows = [r for r in scraper._parse_nts_rows(page.content()) if r.get('doc_number')]
-    if not rows:
-        return None
-    residential = [r for r in rows if is_residential_lead(r.get('grantor', ''))]
-    chosen = (residential or rows)[0]
-    log.info(
-        f"Chosen NTS row: grantor={chosen.get('grantor')!r} doc={chosen.get('doc_number')!r} "
-        f"({'individual' if residential else 'entity only on this page'})"
-    )
-    return chosen
+def parse_fc_table(page):
+    """Parse the Foreclosures results table into row dicts using its real headers."""
+    return page.evaluate("""() => {
+        const out = [];
+        for (const t of document.querySelectorAll('table')) {
+            const heads = Array.from(t.querySelectorAll('th')).map(h => (h.textContent||'').trim().toLowerCase());
+            const idx = name => heads.findIndex(h => h.includes(name));
+            const di = idx('doc type'), rd = idx('recorded'), sd = idx('sale date'),
+                  dn = idx('doc number'), rm = idx('remark'), pa = idx('property address');
+            if (di < 0) continue;
+            for (const tr of Array.from(t.querySelectorAll('tr')).slice(1)) {
+                const c = Array.from(tr.querySelectorAll('td')).map(td => (td.textContent||'').trim());
+                if (!c.length) continue;
+                out.push({
+                    doc_type: c[di]||'', recorded: c[rd]||'', sale_date: c[sd]||'',
+                    doc_number: c[dn]||'', remarks: c[rm]||'', property_address: c[pa]||'',
+                });
+            }
+        }
+        return out;
+    }""")
 
 
 def main():
     captured = []
-    scraper = PublicSearchScraper(COUNTY_SLUG, COUNTY_NAME)
-    start_fmt = (TODAY - timedelta(days=WINDOW_DAYS)).strftime('%m/%d/%Y')
-    end_fmt = TODAY.strftime('%m/%d/%Y')
+    s = (TODAY - timedelta(days=WINDOW_DAYS)).strftime('%Y%m%d')
+    e = TODAY.strftime('%Y%m%d')
+    results_url = (f"{BASE}/results?department=FC"
+                   f"&recordedDateRange={s},{e}&searchType=advancedSearch")
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
@@ -102,56 +83,38 @@ def main():
         page.set_default_timeout(30000)
         page.on('response', lambda r: captured.append(r.url) if is_doc_image(r.url) else None)
 
-        log.info(f"Loading advanced search ({COUNTY_NAME}) ...")
+        # Need a session first (cookies), then go straight to the results URL.
+        log.info("Warm up session at base ...")
         page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
-        page.goto(BASE + '/search/advanced')
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(1500)
+        log.info(f"Direct nav: {results_url}")
+        page.goto(results_url); page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
+        log.info(f"landed: {page.url}")
 
-        ok = select_foreclosures_department(page)
-        log.info(f"Foreclosures department selected: {ok}")
+        rows = parse_fc_table(page)
+        log.info(f"parsed {len(rows)} rows from FC table")
+        for r in rows[:8]:
+            log.info(f"  {r}")
 
-        if page.locator('#recordedDateRange-start').count() > 0:
-            page.fill('#recordedDateRange-start', start_fmt)
-            page.fill('#recordedDateRange-end', end_fmt)
-            log.info(f"date range {start_fmt}->{end_fmt}")
+        # Pagination / total-count inspection.
+        pag = page.evaluate("""() => {
+            const txt = (document.body.innerText||'');
+            const m = txt.match(/([\\d,]+)\\s+(results|records|documents)/i);
+            const btns = Array.from(document.querySelectorAll('button,a,[role="button"]'))
+              .map(b => ((b.textContent||'').trim() + '|' + (b.getAttribute('aria-label')||'')))
+              .filter(s => /next|prev|page|\\u203a|\\u2039|\\d+\\s*of\\s*\\d+/i.test(s)).slice(0, 25);
+            return { count_phrase: m ? m[0] : '(none)', controls: btns };
+        }""")
+        log.info(f"count phrase: {pag['count_phrase']}")
+        log.info(f"pagination controls: {pag['controls']}")
 
-        for bsel in ['button[type="submit"]', 'button:has-text("Search")']:
-            b = page.locator(bsel).first
-            if b.count() > 0:
-                b.click(); break
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
+        # OCR the first NOTICE OF FORECLOSE doc to locate the owner name.
+        nts = next((r for r in rows if 'FORECLOS' in r['doc_type'].upper()
+                    or 'TRUSTEE' in r['doc_type'].upper()), None)
+        if not nts:
+            log.info("no foreclosure row to OCR"); browser.close(); return
+        doc_num = nts['doc_number']
+        log.info(f"OCR target: doc={doc_num} addr={nts['property_address']!r} sale={nts['sale_date']!r}")
 
-        log.info(f"results URL: {page.url}")
-        log.info(f"total table rows page 1: {page.locator('table tr').count()}")
-
-        # Dump the Foreclosures results table structure: headers + first rows.
-        tables = page.evaluate("""() => Array.from(document.querySelectorAll('table')).map(t => ({
-            headers: Array.from(t.querySelectorAll('th')).map(h => (h.textContent||'').trim()),
-            rows: Array.from(t.querySelectorAll('tr')).slice(1, 4).map(
-                tr => Array.from(tr.querySelectorAll('td')).map(td => (td.textContent||'').trim().slice(0, 45))
-            ),
-        }))""")
-        log.info("===== RESULTS TABLE STRUCTURE =====")
-        for ti, t in enumerate(tables):
-            log.info(f"table[{ti}] headers: {t['headers']}")
-            for ri, r in enumerate(t['rows']):
-                log.info(f"  row[{ri}]: {r}")
-
-        chosen = None
-        for page_num in range(1, MAX_PAGES + 1):
-            log.info(f"--- results page {page_num} ---")
-            chosen = pick_nts_row(scraper, page)
-            if chosen:
-                break
-            if not scraper._next_page(page):
-                log.info("No more results pages.")
-                break
-
-        if not chosen:
-            log.info("No NTS row found to OCR."); browser.close(); return
-
-        doc_num = chosen['doc_number']
-        log.info(f"Clicking NTS doc cell {doc_num!r} ...")
         captured.clear()
         clicked = False
         for sel in [f'td:text-is("{doc_num}")', f'td:has-text("{doc_num}")']:
@@ -159,10 +122,10 @@ def main():
             if el.count() > 0 and el.is_visible():
                 el.scroll_into_view_if_needed(); el.click(); clicked = True; break
         if not clicked:
-            log.info(f"Could not click doc cell {doc_num!r}"); browser.close(); return
+            log.info("could not click doc cell"); browser.close(); return
 
         page.wait_for_load_state('networkidle'); page.wait_for_timeout(6000)
-        log.info(f"Doc page: {page.url}")
+        log.info(f"doc page: {page.url}")
         try:
             for _ in range(4):
                 nxt = page.locator('button:has-text("Next in Book"), [aria-label*="next" i]').first
@@ -172,7 +135,7 @@ def main():
             pass
         page.wait_for_timeout(2000)
 
-        log.info(f"Captured {len(captured)} image URL(s)")
+        log.info(f"captured {len(captured)} image URL(s)")
         os.makedirs('/tmp/ps', exist_ok=True)
         saved, seen = [], set()
         for u in captured:
@@ -187,12 +150,12 @@ def main():
                     f.write(body)
                 saved.append(fn)
                 log.info(f"  saved page {len(saved)}: {len(body)} bytes hdr={body[:4]!r}")
-            except Exception as e:
-                log.info(f"  dl err {str(e)[:60]}")
+            except Exception as ex:
+                log.info(f"  dl err {str(ex)[:60]}")
 
         import pytesseract
         from PIL import Image
-        log.info(f"===== REAL NTS OCR ({COUNTY_NAME}, grantor={chosen.get('grantor')!r}) =====")
+        log.info("===== REAL NOTICE OF FORECLOSURE OCR =====")
         for fn in saved[:3]:
             txt = pytesseract.image_to_string(Image.open(fn))
             log.info(f"----- {fn} ({len(txt)} chars) -----")
