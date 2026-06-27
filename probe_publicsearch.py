@@ -1,139 +1,82 @@
 """
-Probe v4 — find an ACTUAL Notice of Trustee Sale doc on publicsearch (not a
-Deed of Trust), OCR all its pages, and print the text so we can see the real
-NTS layout and build the parser. Searches by document-type keyword to surface NTS.
+Probe v5 — check what the RESULTS TABLE already gives us for NTS rows across
+all 5 publicsearch counties. We want to confirm: does the table already contain
+the property address (street/city/zip) for NTS records? If so, no OCR needed.
+
+Searches each county's recent window, finds NTS rows, prints the full row data
+(grantor + address column) exactly as the table provides it.
 """
-import re, logging, os
+import re, logging
 from datetime import date, timedelta
 from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [PS] %(message)s')
 log = logging.getLogger()
 
-SLUG = "bexar"
-BASE = f"https://{SLUG}.tx.publicsearch.us"
+COUNTIES = [('bexar','Bexar'),('dallas','Dallas'),('tarrant','Tarrant'),
+            ('denton','Denton'),('johnson','Johnson')]
 
+NTS_KEYS = ['NOTICE OF TRUSTEE','NOTICE OF SUBSTITUTE','TRUSTEE SALE','NTS','NOTICE OF FORECLOSURE']
 
-def main():
-    start_fmt = (date(2026,6,27) - timedelta(days=120)).strftime('%m/%d/%Y')  # wide range to find NTS
+def is_nts(dt):
+    dt = dt.upper()
+    if 'APPOINTMENT' in dt: return False
+    if any(k in dt for k in NTS_KEYS): return True
+    if dt == 'NOTICE': return True
+    return False
+
+def scan_county(pw, slug, name):
+    base = f"https://{slug}.tx.publicsearch.us"
+    start_fmt = (date(2026,6,27) - timedelta(days=90)).strftime('%m/%d/%Y')
     end_fmt   = date(2026,6,27).strftime('%m/%d/%Y')
+    browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+    ctx = browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+    page = ctx.new_page()
+    page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+    page.set_default_timeout(30000)
+    try:
+        page.goto(base); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
+        page.goto(base+'/search/advanced'); page.wait_for_load_state('networkidle'); page.wait_for_timeout(1200)
+        for s,e in [('input[id*="start" i]','input[id*="end" i]')]:
+            if page.locator(s).count()>0:
+                page.fill(s,start_fmt); page.fill(e,end_fmt); break
+        for bsel in ['button[type="submit"]','button:has-text("Search")']:
+            b=page.locator(bsel).first
+            if b.count()>0: b.click(); break
+        page.wait_for_load_state('networkidle'); page.wait_for_timeout(3500)
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-        ctx = browser.new_context(user_agent=(
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-            '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'))
-        page = ctx.new_page()
-        page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-        page.set_default_timeout(30000)
-
-        captured = []
-        page.on('response', lambda r: captured.append(r.url)
-                if ('/files/documents/' in r.url and '/images/' in r.url and '.png' in r.url) else None)
-
-        log.info("Searching for NTS documents...")
-        page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(1000)
-        page.goto(BASE + '/search/advanced'); page.wait_for_load_state('networkidle'); page.wait_for_timeout(1500)
-
-        # Try to fill a doc-type / keyword field to find Notice of Trustee Sale
-        # publicsearch advanced search usually has a "Document Type" or free-text field
-        typed = False
-        for sel in ['input[id*="docType" i]','input[placeholder*="Type" i]',
-                    'input[id*="searchText" i]','input[placeholder*="eyword" i]',
-                    'input[type="text"]']:
-            try:
-                loc = page.locator(sel).first
-                if loc.count() > 0 and loc.is_visible():
-                    loc.fill('NOTICE OF TRUSTEE')
-                    log.info(f"typed doc-type into {sel}")
-                    typed = True
-                    page.wait_for_timeout(1000)
-                    # Try selecting an autocomplete option if present
-                    try:
-                        opt = page.locator('[role="option"], li:has-text("TRUSTEE")').first
-                        if opt.count() > 0 and opt.is_visible():
-                            opt.click(); log.info("selected autocomplete option")
-                    except Exception: pass
-                    break
-            except Exception: pass
-
-        # Fill date range too
-        for s, e in [('input[id*="start" i]','input[id*="end" i]')]:
-            try:
-                if page.locator(s).count() > 0:
-                    page.fill(s, start_fmt); page.fill(e, end_fmt)
-                    log.info(f"date {start_fmt}->{end_fmt}"); break
-            except Exception: pass
-
-        for btn_sel in ['button[type="submit"]','button:has-text("Search")']:
-            try:
-                b = page.locator(btn_sel).first
-                if b.count() > 0: b.click(); break
-            except Exception: pass
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
-        log.info(f"Results URL: {page.url}")
-
-        # Look at doc-type cells to find an NTS row
-        rows_info = page.evaluate("""() => {
-            var trs = Array.from(document.querySelectorAll('tr'));
-            var out = [];
-            for (var tr of trs) {
-                var txt = (tr.textContent||'');
-                if (/NOTICE|TRUSTEE/i.test(txt)) {
-                    var nums = (txt.match(/\\d{6,}/g)||[]);
-                    out.push({text: txt.slice(0,120), docnum: nums[0]||''});
-                }
-            }
-            return out.slice(0,8);
-        }""")
-        log.info(f"Found {len(rows_info)} rows mentioning NOTICE/TRUSTEE:")
-        for r in rows_info:
-            log.info(f"  doc={r['docnum']} | {r['text']}")
-
-        # Click the first NTS row's doc number
-        target = next((r['docnum'] for r in rows_info if r['docnum']), None)
-        if not target:
-            log.info("No NTS doc found in results; printing all doc-type cells for reference")
-            dts = page.evaluate("""() => Array.from(document.querySelectorAll('td'))
-                .map(t=>(t.textContent||'').trim()).filter(t=>/[A-Z]{3,}/.test(t)).slice(0,20);""")
-            log.info(f"Doc types visible: {dts}")
-            browser.close(); return
-
-        log.info(f"Opening NTS doc {target}...")
-        captured.clear()
-        el = page.locator(f'td:has-text("{target}")').first
-        el.scroll_into_view_if_needed(); el.click()
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(6000)
-        log.info(f"Doc page: {page.url}")
-
-        log.info(f"Captured {len(captured)} image(s)")
-        if not captured:
-            browser.close(); return
-
-        os.makedirs('/tmp/ps', exist_ok=True)
-        saved=[]; seen=set()
-        for u in captured:
-            k=u.split('?')[0]
-            if k in seen: continue
-            seen.add(k)
-            try:
-                body=ctx.request.get(u).body()
-                fn=f"/tmp/ps/{len(saved)}.png"
-                with open(fn,'wb') as f: f.write(body)
-                saved.append(fn)
-            except Exception as e: log.info(f"dl err {str(e)[:50]}")
-        log.info(f"saved {len(saved)} page image(s)")
-
-        import pytesseract
-        from PIL import Image
-        log.info("===== NTS DOCUMENT OCR =====")
-        for fn in saved[:2]:
-            txt = pytesseract.image_to_string(Image.open(fn))
-            log.info(f"----- {fn} ({len(txt)} chars) -----")
-            for ln in txt.split('\n'):
-                if ln.strip(): log.info(f"  | {ln.strip()}")
-
+        # Parse the results table headers + NTS rows
+        soup = BeautifulSoup(page.content(),'lxml')
+        found = 0
+        for table in soup.find_all('table'):
+            headers = [th.get_text(strip=True).lower() for th in table.find_all('th')]
+            if 'grantor' not in headers: continue
+            h = {v:i for i,v in enumerate(headers)}
+            log.info(f"[{name}] headers: {headers}")
+            gi=h.get('grantor',-1); di=h.get('doc type',-1)
+            ai=h.get('property address', h.get('legal description', h.get('town',-1)))
+            ni=h.get('doc number', h.get('inst number',-1))
+            for tr in table.find_all('tr')[1:]:
+                cells=[td.get_text(' ',strip=True) for td in tr.find_all('td')]
+                if not cells: continue
+                def c(i): return cells[i].strip() if 0<=i<len(cells) else ''
+                if not is_nts(c(di)): continue
+                found += 1
+                log.info(f"[{name}] NTS ROW: grantor='{c(gi)}' | doctype='{c(di)}' | ADDRESS_COL='{c(ai)}' | doc#='{c(ni)}'")
+                if found >= 5: break
+        if found == 0:
+            log.info(f"[{name}] 0 NTS rows in 90-day window")
+    except Exception as e:
+        log.info(f"[{name}] error: {str(e)[:80]}")
+    finally:
         browser.close()
 
-if __name__ == '__main__':
+def main():
+    with sync_playwright() as pw:
+        for slug,name in COUNTIES:
+            log.info(f"========== {name} ==========")
+            scan_county(pw, slug, name)
+
+if __name__=='__main__':
     main()
