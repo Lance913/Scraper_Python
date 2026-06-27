@@ -1,101 +1,172 @@
 """
-Probe v6 — OCR an actual NTS document from publicsearch to see its layout.
-We know these NTS doc numbers exist (from v5):
-  Bexar: 20260072427 (ALMANZA JUAN DIEGO - individual!)
-         20260072314 (LENNAR), 20260072451 (PURCHASING FUND)
-  Denton: 2026-34546 (HORTON)
-We search Bexar, click the ALMANZA doc, OCR all pages, print the format.
+Probe v7 — OCR a REAL NTS document from publicsearch to learn its layout.
+
+The point of this probe: see the exact text layout of a publicsearch Notice of
+Trustee Sale so we can write publicsearch_extract.py (sale date + owner + address).
+
+v6's bug: it looked for one hard-coded doc number and, if that doc wasn't on
+results page 1, fell back to clicking the FIRST doc-number cell on the page —
+which grabbed an unrelated UCC filing, not an NTS.
+
+v7 fix: reuse the scraper's own NTS detection. We instantiate the real
+PublicSearchScraper, run its _parse_nts_rows() on each results page (so the probe
+clicks EXACTLY the rows the scraper considers NTS), paginate until we find one,
+prefer an individual/residential lead, click that doc's cell, capture the PNG
+page images, OCR them, and print the layout.
 """
-import re, logging, os
+import logging, os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from datetime import date, timedelta
 from playwright.sync_api import sync_playwright
+from scrapers.publicsearch import PublicSearchScraper, is_residential_lead
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [PS] %(message)s')
 log = logging.getLogger()
 
-BASE = "https://bexar.tx.publicsearch.us"
-TARGET_DOC = "20260072427"  # ALMANZA JUAN DIEGO - the individual NTS
+COUNTY_SLUG = "bexar"
+COUNTY_NAME = "Bexar"
+BASE = f"https://{COUNTY_SLUG}.tx.publicsearch.us"
+TODAY = date(2026, 6, 27)        # repo runs on GH Actions; pin a date for reproducibility
+WINDOW_DAYS = 120                # wide window so we catch some NTS volume
+MAX_PAGES = 6
+
+
+def is_doc_image(url: str) -> bool:
+    return ('/files/documents/' in url and '/images/' in url and '.png' in url)
+
+
+def pick_nts_row(scraper, page):
+    """Run the scraper's own NTS parser on the current results page.
+
+    Returns the NTS row to click — preferring an individual/residential lead
+    (is_residential_lead True) over a builder/HOA/fund, since the whole point is
+    to see an individual homeowner NTS layout. Returns None if no NTS rows here.
+    """
+    rows = scraper._parse_nts_rows(page.content())
+    rows = [r for r in rows if r.get('doc_number')]
+    if not rows:
+        return None
+    residential = [r for r in rows if is_residential_lead(r.get('grantor', ''))]
+    chosen = (residential or rows)[0]
+    log.info(
+        f"Chosen NTS row: grantor={chosen.get('grantor')!r} "
+        f"doc={chosen.get('doc_number')!r} "
+        f"({'individual' if residential else 'entity (no individual on this page)'})"
+    )
+    return chosen
 
 
 def main():
     captured = []
-    start_fmt = (date(2026,6,27) - timedelta(days=120)).strftime('%m/%d/%Y')
-    end_fmt   = date(2026,6,27).strftime('%m/%d/%Y')
+    scraper = PublicSearchScraper(COUNTY_SLUG, COUNTY_NAME)
+
+    start_fmt = (TODAY - timedelta(days=WINDOW_DAYS)).strftime('%m/%d/%Y')
+    end_fmt = TODAY.strftime('%m/%d/%Y')
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-        ctx = browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+        browser = pw.chromium.launch(
+            headless=True, args=['--disable-blink-features=AutomationControlled']
+        )
+        ctx = browser.new_context(user_agent=(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        ))
         page = ctx.new_page()
-        page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+        page.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+        )
         page.set_default_timeout(30000)
-        page.on('response', lambda r: captured.append(r.url)
-                if ('/files/documents/' in r.url and '/images/' in r.url and '.png' in r.url) else None)
+        page.on('response', lambda r: captured.append(r.url) if is_doc_image(r.url) else None)
 
-        log.info("Search Bexar...")
+        log.info(f"Search {COUNTY_NAME} {start_fmt}->{end_fmt} ...")
         page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
-        page.goto(BASE+'/search/advanced'); page.wait_for_load_state('networkidle'); page.wait_for_timeout(1200)
-        for s,e in [('input[id*="start" i]','input[id*="end" i]')]:
-            if page.locator(s).count()>0:
-                page.fill(s,start_fmt); page.fill(e,end_fmt); break
-        for bsel in ['button[type="submit"]','button:has-text("Search")']:
-            b=page.locator(bsel).first
-            if b.count()>0: b.click(); break
+        page.goto(BASE + '/search/advanced')
+        page.wait_for_load_state('networkidle'); page.wait_for_timeout(1200)
+        for s, e in [('input[id*="start" i]', 'input[id*="end" i]')]:
+            if page.locator(s).count() > 0:
+                page.fill(s, start_fmt); page.fill(e, end_fmt); break
+        for bsel in ['button[type="submit"]', 'button:has-text("Search")']:
+            b = page.locator(bsel).first
+            if b.count() > 0:
+                b.click(); break
         page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
 
-        # Find and click the ALMANZA doc number
-        log.info(f"Looking for doc {TARGET_DOC}...")
-        el = page.locator(f'td:has-text("{TARGET_DOC}")').first
-        if el.count() == 0:
-            log.info(f"Doc {TARGET_DOC} not on first page; trying any NTS doc visible")
-            # fall back: click any doc number cell
-            cells = page.evaluate("""() => Array.from(document.querySelectorAll('td'))
-                .map(t=>(t.textContent||'').trim()).filter(t=>/^\\d{6,}$/.test(t)).slice(0,1);""")
-            if cells:
-                el = page.locator(f'td:has-text("{cells[0]}")').first
-                log.info(f"Using fallback doc {cells[0]}")
-        if el.count() == 0:
-            log.info("No doc to click"); browser.close(); return
+        # Paginate until we find an NTS row the scraper recognizes.
+        chosen = None
+        for page_num in range(1, MAX_PAGES + 1):
+            log.info(f"--- results page {page_num} ---")
+            chosen = pick_nts_row(scraper, page)
+            if chosen:
+                break
+            if not scraper._next_page(page):
+                log.info("No more results pages.")
+                break
 
+        if not chosen:
+            log.info("No NTS row found to OCR."); browser.close(); return
+
+        doc_num = chosen['doc_number']
+        log.info(f"Clicking NTS doc cell {doc_num!r} ...")
         captured.clear()
-        el.scroll_into_view_if_needed(); el.click()
+        clicked = False
+        for sel in [
+            f'td:text-is("{doc_num}")',
+            f'td:has-text("{doc_num}")',
+            f'[class*="docNumber" i]:has-text("{doc_num}")',
+        ]:
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                el.scroll_into_view_if_needed(); el.click(); clicked = True; break
+        if not clicked:
+            log.info(f"Could not click doc cell {doc_num!r}"); browser.close(); return
+
         page.wait_for_load_state('networkidle'); page.wait_for_timeout(6000)
         log.info(f"Doc page: {page.url}")
 
-        # The viewer may only load page 1 image initially. Try to trigger multi-page load
-        # by scrolling the viewer / clicking "next in book"
+        # The viewer may only load page-1 image initially; nudge it to load the rest.
         try:
             for _ in range(3):
-                nxt = page.locator('button:has-text("Next in Book"), [aria-label*="next" i]').first
-                if nxt.count()>0 and nxt.is_visible():
+                nxt = page.locator(
+                    'button:has-text("Next in Book"), [aria-label*="next" i]'
+                ).first
+                if nxt.count() > 0 and nxt.is_visible():
                     nxt.click(); page.wait_for_timeout(2000)
-        except Exception: pass
+        except Exception:
+            pass
         page.wait_for_timeout(2000)
 
-        log.info(f"Captured {len(captured)} image(s)")
+        log.info(f"Captured {len(captured)} image URL(s)")
         os.makedirs('/tmp/ps', exist_ok=True)
-        saved=[]; seen=set()
+        saved, seen = [], set()
         for u in captured:
-            k=u.split('?')[0]
-            if k in seen: continue
+            k = u.split('?')[0]
+            if k in seen:
+                continue
             seen.add(k)
             try:
-                body=ctx.request.get(u).body()
-                fn=f"/tmp/ps/{len(saved)}.png"
-                with open(fn,'wb') as f: f.write(body)
+                body = ctx.request.get(u).body()
+                fn = f"/tmp/ps/{len(saved)}.png"
+                with open(fn, 'wb') as f:
+                    f.write(body)
                 saved.append(fn)
-                log.info(f"  saved page: {len(body)} bytes")
-            except Exception as e: log.info(f"dl err {str(e)[:50]}")
+                log.info(f"  saved page {len(saved)}: {len(body)} bytes  hdr={body[:4]!r}")
+            except Exception as e:
+                log.info(f"  dl err {str(e)[:60]}")
 
         import pytesseract
         from PIL import Image
-        log.info("===== NTS DOCUMENT OCR (publicsearch/Bexar) =====")
+        log.info(f"===== NTS DOCUMENT OCR ({COUNTY_NAME}, grantor={chosen.get('grantor')!r}) =====")
         for fn in saved[:3]:
             txt = pytesseract.image_to_string(Image.open(fn))
             log.info(f"----- {fn} ({len(txt)} chars) -----")
             for ln in txt.split('\n'):
-                if ln.strip(): log.info(f"  | {ln.strip()}")
+                if ln.strip():
+                    log.info(f"  | {ln.strip()}")
 
         browser.close()
 
-if __name__=='__main__':
+
+if __name__ == '__main__':
     main()
