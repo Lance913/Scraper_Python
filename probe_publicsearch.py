@@ -1,24 +1,22 @@
 """
-Probe v14 — is the owner/grantor name available WITHOUT OCR?
-
-v13 showed the FC results are server-rendered HTML (no JSON API). The visible
-table has no name column. v14 checks two cheap (no-OCR) name sources:
-  1. The raw outerHTML of a result row — hidden cells / data-attributes / the
-     link to /doc/{id}.
-  2. The server-rendered /doc/{id} detail page HTML — many record portals list
-     Grantor/Grantee/DocType/Legal there even when the document body is a PNG.
-If either contains the grantor name, we can fetch it via ctx.request.get() per
-doc (fast) instead of OCR.
+Probe v15 — de-risk the FC scraper rewrite. Two things:
+  1. Doc-type distribution across several FC results pages (so is_nts is correct).
+  2. End-to-end owner-NAME path: extract docId from a NOTICE row's
+     `table-checkbox-{docId}`, open /doc/{docId}, capture the page-1 PNG, OCR it,
+     and parse the owner with harris_extract's existing patterns.
+Also tallies how many rows are upcoming (sale_date >= today).
 """
 import logging
 import os
 import re
 import sys
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from playwright.sync_api import sync_playwright
+from scrapers.harris_extract import parse_owner
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [PS] %(message)s')
 log = logging.getLogger()
@@ -27,9 +25,52 @@ COUNTY_SLUG = "bexar"
 BASE = f"https://{COUNTY_SLUG}.tx.publicsearch.us"
 TODAY = date(2026, 6, 27)
 WINDOW_DAYS = 120
+SCAN_PAGES = 4
+
+
+def is_doc_image(url):
+    return ('/files/documents/' in url and '/images/' in url and '.png' in url)
+
+
+def parse_rows(page):
+    """Parse FC results rows incl. the internal docId from the checkbox id."""
+    return page.evaluate("""() => {
+        const out = [];
+        const t = document.querySelector('table');
+        if (!t) return out;
+        const heads = Array.from(t.querySelectorAll('th')).map(h => (h.textContent||'').trim().toLowerCase());
+        const idx = n => heads.findIndex(h => h.includes(n));
+        const di=idx('doc type'), rd=idx('recorded'), sd=idx('sale date'),
+              dn=idx('doc number'), rm=idx('remark'), pa=idx('property address');
+        for (const tr of Array.from(t.querySelectorAll('tr')).slice(1)) {
+            const c = Array.from(tr.querySelectorAll('td')).map(td => (td.textContent||'').trim());
+            if (!c.length) continue;
+            const cb = tr.querySelector('input[id^="table-checkbox-"]');
+            const docId = cb ? cb.id.replace('table-checkbox-','') : '';
+            out.push({ doc_type:c[di]||'', recorded:c[rd]||'', sale_date:c[sd]||'',
+                       doc_number:c[dn]||'', remarks:c[rm]||'', property_address:c[pa]||'', doc_id:docId });
+        }
+        return out;
+    }""")
+
+
+def go_next(page):
+    el = page.locator('[aria-label="next page"]').first
+    if el.count() > 0 and el.is_enabled():
+        el.click(); page.wait_for_load_state('networkidle'); page.wait_for_timeout(2500)
+        return True
+    return False
+
+
+def upcoming(sale_date):
+    try:
+        return datetime.strptime(sale_date, '%m/%d/%Y').date() >= TODAY
+    except Exception:
+        return False
 
 
 def main():
+    captured = []
     s = (TODAY - timedelta(days=WINDOW_DAYS)).strftime('%Y%m%d')
     e = TODAY.strftime('%Y%m%d')
     results_url = (f"{BASE}/results?department=FC"
@@ -46,72 +87,58 @@ def main():
         page = ctx.new_page()
         page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page.set_default_timeout(30000)
+        page.on('response', lambda r: captured.append(r.url) if is_doc_image(r.url) else None)
 
-        log.info("Warm up session ...")
+        log.info("Warm up ...")
         page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
-        log.info(f"Nav FC results: {results_url}")
-        page.goto(results_url); page.wait_for_load_state('networkidle'); page.wait_for_timeout(5000)
+        page.goto(results_url); page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
 
-        # 1) Raw HTML of the first 2 data rows.
-        rows_html = page.evaluate("""() => {
-            const t = document.querySelector('table');
-            if (!t) return [];
-            return Array.from(t.querySelectorAll('tr')).slice(1, 3).map(tr => tr.outerHTML);
-        }""")
-        log.info("===== RAW ROW HTML (first 2) =====")
-        for i, h in enumerate(rows_html):
-            log.info(f"----- row[{i}] -----")
-            for chunk in re.findall(r'.{1,300}', h):
-                log.info(f"  {chunk}")
+        # 1) Scan several pages: doc-type distribution + upcoming tally.
+        dtypes = Counter()
+        up = 0
+        total = 0
+        sample_notice = []
+        for pg in range(1, SCAN_PAGES + 1):
+            rows = parse_rows(page)
+            log.info(f"page {pg}: {len(rows)} rows")
+            for r in rows:
+                total += 1
+                dtypes[r['doc_type']] += 1
+                if upcoming(r['sale_date']):
+                    up += 1
+                if 'FORECLOS' in r['doc_type'].upper() and r['doc_id'] and len(sample_notice) < 3:
+                    sample_notice.append(r)
+            if not go_next(page):
+                log.info("no next page"); break
 
-        # Find a /doc/{id} link from the row HTML or any anchor.
-        doc_hrefs = page.evaluate("""() => Array.from(document.querySelectorAll('a[href*="/doc/"]'))
-            .map(a => a.getAttribute('href')).slice(0, 5)""")
-        log.info(f"/doc/ hrefs found: {doc_hrefs}")
+        log.info(f"===== DOC TYPE DISTRIBUTION ({total} rows over {SCAN_PAGES} pages) =====")
+        for dt, n in dtypes.most_common():
+            log.info(f"  {n:4}  {dt!r}")
+        log.info(f"upcoming (sale_date >= {TODAY}): {up}/{total}")
 
-        # If no anchors, click first row to discover the doc id.
-        doc_id = None
-        if doc_hrefs:
-            m = re.search(r'/doc/(\d+)', doc_hrefs[0])
-            doc_id = m.group(1) if m else None
-        if not doc_id:
-            first_cell = page.locator('table tr:nth-child(2) td').nth(6)  # doc number col
-            if first_cell.count() > 0:
-                first_cell.click()
-                page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
-                m = re.search(r'/doc/(\d+)', page.url)
-                doc_id = m.group(1) if m else None
-                log.info(f"navigated to doc page: {page.url}")
-
-        log.info(f"doc_id = {doc_id}")
-        if not doc_id:
-            log.info("no doc id; stopping"); browser.close(); return
-
-        # 2) Fetch the /doc/{id} detail page HTML via the session request API.
-        doc_url = f"{BASE}/doc/{doc_id}"
-        resp = ctx.request.get(doc_url)
-        html = resp.text()
-        log.info(f"doc page HTML len={len(html)} status={resp.status}")
-
-        # Look for party-name labels in the HTML.
-        for label in ['grantor', 'grantee', 'party', 'partyName', 'data-grantor',
-                      'doctype', 'doc_type', 'legal', 'instrument']:
-            idxs = [m.start() for m in re.finditer(label, html, re.I)][:3]
-            for ix in idxs:
-                snippet = html[max(0, ix - 40):ix + 160].replace('\n', ' ')
-                log.info(f"  [{label}] ...{snippet}...")
-
-        # Also dump any visible text that looks like a name list near the top.
-        try:
-            page.goto(doc_url); page.wait_for_load_state('networkidle'); page.wait_for_timeout(3000)
-            vis = page.evaluate(
-                "() => (document.body.innerText||'').split('\\n').map(s=>s.trim()).filter(Boolean).slice(0,60)"
-            )
-            log.info("===== DOC PAGE VISIBLE TEXT (first 60 lines) =====")
-            for ln in vis:
-                log.info(f"  | {ln}")
-        except Exception as ex:
-            log.info(f"doc visible-text err: {str(ex)[:80]}")
+        # 2) Owner-name OCR path for a few NOTICE rows (fetch /doc/{id} -> PNG -> OCR).
+        import pytesseract
+        from PIL import Image
+        os.makedirs('/tmp/ps', exist_ok=True)
+        log.info("===== OWNER-NAME OCR VALIDATION =====")
+        for r in sample_notice:
+            captured.clear()
+            doc_url = f"{BASE}/doc/{r['doc_id']}"
+            page.goto(doc_url); page.wait_for_load_state('networkidle'); page.wait_for_timeout(5000)
+            if not captured:
+                log.info(f"  doc {r['doc_id']}: no PNG captured"); continue
+            png_url = captured[0]
+            try:
+                body = ctx.request.get(png_url).body()
+                fn = f"/tmp/ps/{r['doc_id']}.png"
+                with open(fn, 'wb') as f:
+                    f.write(body)
+                txt = pytesseract.image_to_string(Image.open(fn))
+                owner = parse_owner(txt)
+                log.info(f"  doc {r['doc_id']} addr={r['property_address']!r} sale={r['sale_date']!r}")
+                log.info(f"     -> OWNER(parse_owner) = {owner!r}  (page1 {len(txt)} chars, {len(body)} bytes)")
+            except Exception as ex:
+                log.info(f"  doc {r['doc_id']} err: {str(ex)[:80]}")
 
         browser.close()
 
