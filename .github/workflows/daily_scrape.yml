@@ -22,7 +22,7 @@ jobs:
   scrape:
     name: Scrape foreclosure data
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repo
@@ -33,6 +33,9 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+
+      - name: Install system OCR deps (tesseract + poppler)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt

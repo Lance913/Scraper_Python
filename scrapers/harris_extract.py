@@ -43,7 +43,7 @@ RE_PROP_LABEL = re.compile(r'Property\s+Address[:\s]+(.+?)(?:\s+TX|\s+TEXAS)\s+(
 # city,state,zip line
 RE_CSZ = re.compile(r'^([A-Z][A-Za-z .]+?),?\s+(?:TX|TEXAS)\s+(\d{5})(?:-\d{4})?\s*$', re.I)
 # street line (number + words), trailing barcode digits stripped
-RE_STREET = re.compile(r'^\s*(\d{2,6}\s+[A-Z0-9][A-Za-z0-9 .#-]{3,40}?)(?:\s+\d{7,})?\s*$')
+RE_STREET = re.compile(r'^\s*(\d{2,6}\s+[A-Z0-9][A-Za-z0-9 .#-]{3,45}?)(?:\s+\d{6,})?\s*-?\s*$')
 
 # --- Owner patterns (label-anchored, highest confidence first) ---
 RE_OWNER = [
@@ -67,6 +67,9 @@ def looks_like_owner(name):
 
 def clean_name(name):
     name = re.sub(r'\b(A SINGLE PERSON|A SINGLE MAN|A SINGLE WOMAN|A MARRIED|AN UNMARRIED|HUSBAND AND WIFE|WIFE AND HUSBAND|AND HIS WIFE|AND HER HUSBAND).*$','',name,flags=re.I)
+    # strip trailing OCR cruft: "Origi", "Inal", lone 1-4 char fragments at end
+    name = re.sub(r'\s+(Orig|Inal|Origi|Original)\b.*$','',name,flags=re.I)
+    name = re.sub(r'\s+[A-Z]{1,3}$','',name)  # trailing 1-3 cap fragment
     return re.sub(r'\s+',' ',name).strip(' ,.')
 
 def split_name(full):
@@ -76,6 +79,19 @@ def split_name(full):
     return p[0].title(), ' '.join(p[1:]).title()
 
 
+HOUSTON_CITIES = ['HOUSTON','KATY','HUMBLE','SPRING','CYPRESS','CHANNELVIEW',
+    'PASADENA','PEARLAND','TOMBALL','BAYTOWN','CONROE','RICHMOND','ROSENBERG',
+    'MISSOURI CITY','SUGAR LAND','STAFFORD','DEER PARK','LA PORTE','FRIENDSWOOD']
+
+def _split_city_from_street(street):
+    '''If a city name is glued to the end of the street, split it off.'''
+    up = street.upper()
+    for city in sorted(HOUSTON_CITIES, key=len, reverse=True):
+        # city at end, possibly with trailing OCR garble like 'HO! ON'
+        if up.endswith(' '+city):
+            return street[:-(len(city)+1)].strip(' ,.'), city.title()
+    return street, ''
+
 def parse_address(text):
     lines = [l.strip() for l in text.split('\n') if l.strip()]
 
@@ -83,8 +99,10 @@ def parse_address(text):
     m = RE_PROP_LABEL.search(text)
     if m:
         street = re.sub(r'\s+\d{7,}$','',m.group(1).strip())
+        street = re.sub(r'\s*-\s*$','',street).strip(' ,.')
         if not _is_venue(street):
-            return street.strip(' ,.'), '', 'TX', m.group(2)
+            street, city = _split_city_from_street(street)
+            return street, city, 'TX', m.group(2)
 
     # 2) header block: street line followed by CITY, TX ZIP, in first ~7 lines
     for i in range(min(len(lines), 8)):
@@ -96,8 +114,10 @@ def parse_address(text):
             nxt = lines[i+1]
             cm = RE_CSZ.match(nxt)
             if cm and not _is_venue(nxt):
-                street = sm.group(1).strip()
-                return street, cm.group(1).strip().title(), 'TX', cm.group(2)
+                street = re.sub(r'\s*-\s*$','',sm.group(1).strip()).strip(' ,.')
+                street2, scity = _split_city_from_street(street)
+                city = scity or cm.group(1).strip().title()
+                return street2, city, 'TX', cm.group(2)
 
     # 3) any CITY, TX ZIP not a venue, with street on the prior line
     for i, ln in enumerate(lines):
@@ -108,7 +128,9 @@ def parse_address(text):
             if i > 0:
                 sm = RE_STREET.match(lines[i-1])
                 if sm and not _is_venue(lines[i-1]):
-                    street = sm.group(1).strip()
+                    street = re.sub(r'\s*-\s*$','',sm.group(1).strip()).strip(' ,.')
+                    s2, sc = _split_city_from_street(street)
+                    if sc: street, city = s2, sc
             return street, city, 'TX', zipc
 
     return '', '', 'TX', ''
