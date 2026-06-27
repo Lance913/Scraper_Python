@@ -57,19 +57,43 @@ RE_OWNER = [
 
 def _is_venue(s): return any(t in s.upper() for t in VENUE_TOKENS)
 
+def _is_harris_zip(zipc):
+    '''Harris County and immediate metro ZIPs start 770-775 (+ 77562, 77571 etc).
+    Reject Dallas/Plano/Addison (75xxx), Austin (78xxx), El Paso (79xxx) — those
+    are law-firm / servicer mailing addresses, NOT the foreclosed property.'''
+    if not zipc or len(zipc) < 3:
+        return False
+    prefix = zipc[:3]
+    # Greater Houston / Harris area
+    return prefix in ('770','771','772','773','774','775','776','777')
+
+# Law-firm / servicer cities that must never be treated as the property city
+SERVICER_CITIES = ['ADDISON','PLANO','IRVING','DALLAS','COPPELL','EL PASO',
+                   'FORT MILL','OWENSBORO','VIRGINIA','AUSTIN','SAN ANTONIO']
+
+JUNK_NAMES = {'TO THE','THE PROPERTY','OF THE','IN THE','AND THE','TO BE',
+              'AS THE','FOR THE','BY THE','OF SALE','DEED OF'}
+
 def looks_like_owner(name):
-    up = name.upper()
+    up = name.upper().strip()
+    if up in JUNK_NAMES: return False
     if any(t in up for t in NON_OWNER_TOKENS): return False
     if _is_venue(name): return False
     w = name.split()
     if not (2 <= len(w) <= 7): return False
+    # each word should be a plausible name token (>=2 chars, mostly alpha)
+    real_words = [x for x in w if len(x) >= 2 and sum(ch.isalpha() for ch in x) >= 2]
+    if len(real_words) < 2: return False
     return sum(c.isalpha() or c.isspace() or c=='.' for c in name)/max(len(name),1) > 0.82
 
 def clean_name(name):
     name = re.sub(r'\b(A SINGLE PERSON|A SINGLE MAN|A SINGLE WOMAN|A MARRIED|AN UNMARRIED|HUSBAND AND WIFE|WIFE AND HUSBAND|AND HIS WIFE|AND HER HUSBAND).*$','',name,flags=re.I)
-    # strip trailing OCR cruft: "Origi", "Inal", lone 1-4 char fragments at end
-    name = re.sub(r'\s+(Orig|Inal|Origi|Original)\b.*$','',name,flags=re.I)
-    name = re.sub(r'\s+[A-Z]{1,3}$','',name)  # trailing 1-3 cap fragment
+    # cut at OCR garble markers that follow the real name
+    name = re.sub(r'\b(Orig|Inal|Origi|Original|Iginal|Ginal|Ped|Yel)\b.*$','',name,flags=re.I)
+    # drop a dangling "And" / "&" at the end (incomplete co-borrower)
+    name = re.sub(r'\s+(And|&)\s*$','',name,flags=re.I)
+    # trailing 1-2 char fragment
+    name = re.sub(r'\s+[A-Z]{1,2}$','',name)
     return re.sub(r'\s+',' ',name).strip(' ,.')
 
 def split_name(full):
@@ -100,9 +124,10 @@ def parse_address(text):
     if m:
         street = re.sub(r'\s+\d{7,}$','',m.group(1).strip())
         street = re.sub(r'\s*-\s*$','',street).strip(' ,.')
-        if not _is_venue(street):
+        if not _is_venue(street) and _is_harris_zip(m.group(2)):
             street, city = _split_city_from_street(street)
-            return street, city, 'TX', m.group(2)
+            if city.upper() not in SERVICER_CITIES:
+                return street, city, 'TX', m.group(2)
 
     # 2) header block: street line followed by CITY, TX ZIP, in first ~7 lines
     for i in range(min(len(lines), 8)):
@@ -113,26 +138,16 @@ def parse_address(text):
         if sm and i+1 < len(lines):
             nxt = lines[i+1]
             cm = RE_CSZ.match(nxt)
-            if cm and not _is_venue(nxt):
+            if cm and not _is_venue(nxt) and _is_harris_zip(cm.group(2)):
                 street = re.sub(r'\s*-\s*$','',sm.group(1).strip()).strip(' ,.')
                 street2, scity = _split_city_from_street(street)
                 city = scity or cm.group(1).strip().title()
-                return street2, city, 'TX', cm.group(2)
+                if city.upper() not in SERVICER_CITIES:
+                    return street2, city, 'TX', cm.group(2)
 
-    # 3) any CITY, TX ZIP not a venue, with street on the prior line
-    for i, ln in enumerate(lines):
-        cm = RE_CSZ.match(ln)
-        if cm and not _is_venue(ln):
-            city, zipc = cm.group(1).strip().title(), cm.group(2)
-            street = ''
-            if i > 0:
-                sm = RE_STREET.match(lines[i-1])
-                if sm and not _is_venue(lines[i-1]):
-                    street = re.sub(r'\s*-\s*$','',sm.group(1).strip()).strip(' ,.')
-                    s2, sc = _split_city_from_street(street)
-                    if sc: street, city = s2, sc
-            return street, city, 'TX', zipc
-
+    # Path 3 removed: it grabbed the first city/zip on the page, which is almost
+    # always the trustee law firm (Addison/Plano/Dallas), not the property.
+    # We only trust the header block + explicit "Property Address:" label above.
     return '', '', 'TX', ''
 
 
