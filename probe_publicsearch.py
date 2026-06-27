@@ -124,6 +124,19 @@ def main():
         log.info(f"results URL: {page.url}")
         log.info(f"total table rows page 1: {page.locator('table tr').count()}")
 
+        # Dump the Foreclosures results table structure: headers + first rows.
+        tables = page.evaluate("""() => Array.from(document.querySelectorAll('table')).map(t => ({
+            headers: Array.from(t.querySelectorAll('th')).map(h => (h.textContent||'').trim()),
+            rows: Array.from(t.querySelectorAll('tr')).slice(1, 4).map(
+                tr => Array.from(tr.querySelectorAll('td')).map(td => (td.textContent||'').trim().slice(0, 45))
+            ),
+        }))""")
+        log.info("===== RESULTS TABLE STRUCTURE =====")
+        for ti, t in enumerate(tables):
+            log.info(f"table[{ti}] headers: {t['headers']}")
+            for ri, r in enumerate(t['rows']):
+                log.info(f"  row[{ri}]: {r}")
+
         chosen = None
         for page_num in range(1, MAX_PAGES + 1):
             log.info(f"--- results page {page_num} ---")
