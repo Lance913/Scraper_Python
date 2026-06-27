@@ -1,11 +1,10 @@
 """
-Probe v12 — find the JSON API behind the Foreclosures results page.
+Probe v13 — robustly find the JSON data API behind the FC results page.
 
-The results page is a React app; it fetches rows from a backend API. If that API
-returns the owner/grantor NAME alongside address + sale date, we can skip OCR
-entirely and get complete leads fast. This probe captures every JSON/XHR
-response while loading the FC results URL and dumps the most promising payload's
-structure (keys + a sample record).
+v12 captured almost nothing (reading bodies inside the response event failed
+silently). v13 records EVERY response object, then after the page settles prints
+all xhr/fetch endpoints and reads the body of the data API (the one mentioning
+grantor/saleDate/docNumber) to see if owner names are available without OCR.
 """
 import json
 import logging
@@ -25,44 +24,26 @@ BASE = f"https://{COUNTY_SLUG}.tx.publicsearch.us"
 TODAY = date(2026, 6, 27)
 WINDOW_DAYS = 120
 
-captured = []  # (url, status, content_type, body_text)
 
-
-def on_response(resp):
-    try:
-        ct = resp.headers.get('content-type', '')
-        url = resp.url
-        # Capture JSON / api-looking responses; skip static assets + images.
-        if ('application/json' in ct or '/api' in url or '/search' in url) and \
-           '.png' not in url and '.js' not in url and '.css' not in url:
-            body = resp.text()
-            captured.append((url, resp.status, ct, body[:200000]))
-    except Exception:
-        pass
-
-
-def summarize(obj, depth=0, maxd=3):
-    """Return a compact shape description of a JSON object."""
+def summarize(obj, depth=0, maxd=4):
     pad = '  ' * depth
     if depth > maxd:
         return pad + '...'
     if isinstance(obj, dict):
-        lines = []
-        for k, v in list(obj.items())[:40]:
+        out = []
+        for k, v in list(obj.items())[:50]:
             if isinstance(v, (dict, list)):
-                lines.append(f"{pad}{k}:")
-                lines.append(summarize(v, depth + 1, maxd))
+                out.append(f"{pad}{k}:")
+                out.append(summarize(v, depth + 1, maxd))
             else:
                 sv = repr(v)
-                if len(sv) > 80:
-                    sv = sv[:80] + '...'
-                lines.append(f"{pad}{k}: {sv}")
-        return '\n'.join(lines)
+                out.append(f"{pad}{k}: {sv[:90]}")
+        return '\n'.join(out)
     if isinstance(obj, list):
         if not obj:
-            return pad + '[] (empty)'
-        return f"{pad}[list len={len(obj)}], first item:\n" + summarize(obj[0], depth + 1, maxd)
-    return pad + repr(obj)
+            return pad + '[]'
+        return f"{pad}[list len={len(obj)}] first:\n" + summarize(obj[0], depth + 1, maxd)
+    return pad + repr(obj)[:90]
 
 
 def main():
@@ -70,6 +51,8 @@ def main():
     e = TODAY.strftime('%Y%m%d')
     results_url = (f"{BASE}/results?department=FC"
                    f"&recordedDateRange={s},{e}&searchType=advancedSearch")
+
+    responses = []  # raw Response objects
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
@@ -82,54 +65,70 @@ def main():
         page = ctx.new_page()
         page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page.set_default_timeout(30000)
-        page.on('response', on_response)
+        page.on('response', lambda r: responses.append(r))
 
         log.info("Warm up session ...")
         page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
         log.info(f"Nav to FC results: {results_url}")
-        page.goto(results_url); page.wait_for_load_state('networkidle'); page.wait_for_timeout(5000)
+        page.goto(results_url); page.wait_for_load_state('networkidle'); page.wait_for_timeout(6000)
 
-        log.info(f"Captured {len(captured)} JSON/API responses:")
-        for url, status, ct, body in captured:
-            log.info(f"  [{status}] {ct[:30]} {url[:160]}  (len={len(body)})")
+        # List all xhr/fetch endpoints.
+        log.info("===== XHR / FETCH ENDPOINTS =====")
+        api_candidates = []
+        for r in responses:
+            try:
+                rt = r.request.resource_type
+            except Exception:
+                rt = '?'
+            if rt in ('xhr', 'fetch'):
+                ct = r.headers.get('content-type', '')
+                log.info(f"  [{r.status}] {rt} {ct[:25]} {r.url[:170]}")
+                if 'json' in ct or '/api' in r.url or 'graphql' in r.url.lower():
+                    api_candidates.append(r)
 
-        # Find the payload that most likely holds the result rows.
-        best = None
-        for url, status, ct, body in captured:
+        # Read bodies of API candidates; find the one with result rows.
+        log.info(f"===== READING {len(api_candidates)} API CANDIDATE BODIES =====")
+        data_resp = None
+        for r in api_candidates:
+            try:
+                body = r.text()
+            except Exception as ex:
+                log.info(f"  body read failed for {r.url[:80]}: {str(ex)[:60]}")
+                continue
             low = body.lower()
-            if any(k in low for k in ['grantor', 'grantee', 'saledate', 'sale_date',
-                                      'docnumber', 'doc_number', 'instrument', 'searchresult']):
-                best = (url, body)
-                break
-        if not best and captured:
-            best = max(captured, key=lambda c: len(c[3]))[0:1] + (max(captured, key=lambda c: len(c[3]))[3],)
+            hit = any(k in low for k in ['grantor', 'grantee', 'saledate', 'sale_date',
+                                         'docnumber', 'doc_number', 'instrumentnumber',
+                                         'searchresult', 'results', 'totalcount'])
+            log.info(f"  {r.url[:120]} len={len(body)} data_hit={hit}")
+            if hit and (data_resp is None or len(body) > len(data_resp[1])):
+                data_resp = (r.url, body)
 
-        if not best:
-            log.info("No JSON payload captured."); browser.close(); return
+        if not data_resp:
+            log.info("No data API body identified."); browser.close(); return
 
-        url, body = best
-        log.info(f"===== MOST PROMISING PAYLOAD =====\n{url}")
+        url, body = data_resp
+        log.info(f"===== DATA API =====\n{url}")
         try:
             data = json.loads(body)
             log.info("----- SHAPE -----")
             for ln in summarize(data).split('\n'):
                 log.info(ln)
-            # Try to print one full result record if we can find a list of rows.
+
             def find_rows(o):
                 if isinstance(o, list) and o and isinstance(o[0], dict):
                     return o
                 if isinstance(o, dict):
                     for v in o.values():
-                        r = find_rows(v)
-                        if r:
-                            return r
+                        rr = find_rows(v)
+                        if rr:
+                            return rr
                 return None
             rows = find_rows(data)
             if rows:
                 log.info(f"----- SAMPLE RECORD (of {len(rows)}) -----")
-                log.info(json.dumps(rows[0], indent=2)[:4000])
+                log.info(json.dumps(rows[0], indent=2)[:5000])
         except Exception as ex:
-            log.info(f"JSON parse failed ({ex}); raw head:")
+            log.info(f"JSON parse failed ({ex}); head:")
             log.info(body[:3000])
 
         browser.close()
