@@ -1,7 +1,8 @@
 """
-Probe v3 — CONFIRMED: ViewECdocs.aspx streams a file download (not a page).
-Now: capture the download, save it, identify the file type, report size.
-This proves the OCR path is viable.
+Probe v4 — PDF confirmed. Now: download it, save to repo artifact dir,
+and test BOTH text extraction (pdfplumber/pypdf) AND report page count.
+This tells us: embedded text layer (fast) vs needs-OCR (slow).
+Saves the PDF so we can pull it as an artifact and inspect locally.
 """
 import os, logging
 from playwright.sync_api import sync_playwright
@@ -15,8 +16,12 @@ YEAR_NAME   = 'ctl00$ContentPlaceHolder1$ddlYear'
 MONTH_NAME  = 'ctl00$ContentPlaceHolder1$ddlMonth'
 SEARCH_NAME = 'ctl00$ContentPlaceHolder1$btnSearch'
 
+OUT_DIR = "probe_artifacts"
 
-def main():
+
+def download_sample_pdfs(n=3):
+    os.makedirs(OUT_DIR, exist_ok=True)
+    saved = []
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
         ctx = browser.new_context(accept_downloads=True)
@@ -39,58 +44,58 @@ def main():
             log.warning(f"nav: {e}")
         page.wait_for_timeout(2500)
 
-        href = page.evaluate("""() => {
-            var a = Array.from(document.querySelectorAll('a')).filter(x=>/FRCL/.test(x.textContent||''))[0];
-            return a ? a.getAttribute('href') : null;
+        # Get the first N FRCL links' relative hrefs + doc ids
+        links = page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('a'))
+                .filter(x=>/FRCL/.test(x.textContent||''))
+                .map(a=>({id:a.textContent.trim(), href:a.getAttribute('href')}));
         }""")
-        abs_url = APP_BASE + href
-        log.info(f"Doc URL: {abs_url[:85]}...")
+        log.info(f"Found {len(links)} doc links")
 
-        # === Capture the download by clicking the link ===
-        log.info("=== Method 1: capture download via click ===")
-        try:
-            with page.expect_download(timeout=20000) as dl_info:
-                # open in same tab to trigger download capture
-                page.evaluate("""() => {
-                    var a=Array.from(document.querySelectorAll('a')).filter(x=>/FRCL/.test(x.textContent||''))[0];
-                    if(a){ a.removeAttribute('target'); a.click(); }
-                }""")
-            dl = dl_info.value
-            path = "/tmp/harris_doc_dl"
-            dl.save_as(path)
-            size = os.path.getsize(path)
-            log.info(f">>> DOWNLOAD CAPTURED: suggested_name={dl.suggested_filename}, size={size} bytes")
-            with open(path, 'rb') as f:
-                header = f.read(16)
-            log.info(f">>> FILE HEADER (hex): {header.hex()}")
-            log.info(f">>> FILE HEADER (ascii): {header[:8]}")
-            # Identify type
-            if header[:4] == b'%PDF':
-                log.info(">>> FILE TYPE: PDF ✓ (OCR-ready)")
-            elif header[:2] in (b'II', b'MM'):
-                log.info(">>> FILE TYPE: TIFF ✓ (OCR-ready)")
-            elif header[:3] == b'\xff\xd8\xff':
-                log.info(">>> FILE TYPE: JPEG ✓ (OCR-ready)")
-            elif header[:8] == b'\x89PNG\r\n\x1a\n':
-                log.info(">>> FILE TYPE: PNG ✓ (OCR-ready)")
-            else:
-                log.info(f">>> FILE TYPE: UNKNOWN — first bytes {header}")
-        except Exception as e:
-            log.info(f"download via click failed: {str(e)[:120]}")
-
-            # Method 2: use Playwright's request context (carries session cookies)
-            log.info("=== Method 2: fetch via API request (same session cookies) ===")
+        for i, lk in enumerate(links[:n]):
+            url = APP_BASE + lk['href']
             try:
-                api_resp = ctx.request.get(abs_url)
-                log.info(f"API status: {api_resp.status}, ct={api_resp.headers.get('content-type','')}, len={api_resp.headers.get('content-length','?')}")
-                body = api_resp.body()
-                log.info(f"API body size: {len(body)} bytes, header hex: {body[:16].hex()}, ascii: {body[:8]}")
-                if body[:4]==b'%PDF': log.info(">>> PDF via API ✓")
-                elif body[:2] in (b'II',b'MM'): log.info(">>> TIFF via API ✓")
-            except Exception as e2:
-                log.info(f"API fetch failed: {str(e2)[:120]}")
+                resp = ctx.request.get(url)
+                body = resp.body()
+                fn = os.path.join(OUT_DIR, f"{lk['id']}.pdf")
+                with open(fn, 'wb') as f:
+                    f.write(body)
+                log.info(f"Saved {lk['id']}.pdf ({len(body)} bytes), header={body[:8]}")
+                saved.append(fn)
+            except Exception as e:
+                log.info(f"  {lk['id']} fetch err: {str(e)[:80]}")
 
         browser.close()
+    return saved
+
+
+def test_text_extraction(pdf_path):
+    log.info(f"--- Testing extraction on {os.path.basename(pdf_path)} ---")
+    # Try pypdf first
+    try:
+        from pypdf import PdfReader
+        r = PdfReader(pdf_path)
+        npages = len(r.pages)
+        text = ""
+        for pg in r.pages:
+            text += pg.extract_text() or ""
+        log.info(f"  pypdf: {npages} pages, {len(text)} chars of embedded text")
+        if len(text) > 50:
+            log.info(f"  EMBEDDED TEXT FOUND (fast path!): {text[:300].strip()}")
+            return 'text', text
+        else:
+            log.info(f"  No meaningful embedded text → needs OCR")
+    except Exception as e:
+        log.info(f"  pypdf err: {str(e)[:100]}")
+    return 'ocr', None
+
+
+def main():
+    saved = download_sample_pdfs(3)
+    log.info(f"=== Downloaded {len(saved)} PDFs, testing extraction ===")
+    for p in saved:
+        mode, text = test_text_extraction(p)
+    log.info("=== DONE — check artifacts for the PDFs ===")
 
 if __name__ == '__main__':
     main()
