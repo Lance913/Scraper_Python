@@ -35,7 +35,7 @@ from .base import BaseScraper
 from . import publicsearch_extract as pse
 
 # ── Tunables (env-overridable so the workflow can trade runtime for coverage) ──
-WINDOW_DAYS = int(os.environ.get('PUBLICSEARCH_WINDOW_DAYS', '45'))
+WINDOW_DAYS = int(os.environ.get('PUBLICSEARCH_WINDOW_DAYS', '60'))
 MAX_PAGES = int(os.environ.get('PUBLICSEARCH_MAX_PAGES', '40'))      # 50 rows/page
 OCR_BUDGET_SEC = int(os.environ.get('PUBLICSEARCH_OCR_BUDGET', '240'))  # per county
 OCR_MAX_DOCS = int(os.environ.get('PUBLICSEARCH_OCR_MAX', '150'))    # per county
