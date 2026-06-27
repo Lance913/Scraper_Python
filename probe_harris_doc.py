@@ -1,10 +1,12 @@
 """
-Probe v5 — PDFs are scanned images. Run OCR on the first 2 sample docs,
-page 1 (where grantor + property address live on a Notice of Trustee Sale),
-and PRINT the OCR text so we can see the exact format and build the parser.
+Probe v6 (FINAL VALIDATION) — run the production extraction pipeline on 5 real
+Harris docs, OCR all 3 pages each, show the extracted owner+address records.
+This proves what % of records get full data vs partial vs doc_id-fallback.
 """
-import os, logging
+import os, sys, logging
+sys.path.insert(0, 'scrapers')
 from playwright.sync_api import sync_playwright
+from harris_extract import extract_from_pdf_bytes
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [PROBE] %(message)s')
 log = logging.getLogger()
@@ -14,12 +16,9 @@ APP_BASE    = "https://www.cclerk.hctx.net/applications/websearch/"
 YEAR_NAME   = 'ctl00$ContentPlaceHolder1$ddlYear'
 MONTH_NAME  = 'ctl00$ContentPlaceHolder1$ddlMonth'
 SEARCH_NAME = 'ctl00$ContentPlaceHolder1$btnSearch'
-OUT_DIR = "probe_artifacts"
 
 
-def get_pdfs(n=2):
-    os.makedirs(OUT_DIR, exist_ok=True)
-    saved = []
+def main():
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
         ctx = browser.new_context(accept_downloads=True)
@@ -43,44 +42,26 @@ def get_pdfs(n=2):
         links = page.evaluate("""() => Array.from(document.querySelectorAll('a'))
             .filter(x=>/FRCL/.test(x.textContent||''))
             .map(a=>({id:a.textContent.trim(), href:a.getAttribute('href')}));""")
-        for lk in links[:n]:
+        log.info(f"Testing extraction on 5 of {len(links)} docs...")
+
+        full=partial=none=0
+        for lk in links[:5]:
             try:
                 body = ctx.request.get(APP_BASE + lk['href']).body()
-                fn = os.path.join(OUT_DIR, f"{lk['id']}.pdf")
-                with open(fn,'wb') as f: f.write(body)
-                saved.append(fn); log.info(f"Saved {lk['id']}.pdf ({len(body)}b)")
+                rec = extract_from_pdf_bytes(body)
+                name = f"{rec['first_name']} {rec['last_name']}".strip()
+                addr = f"{rec['address']}, {rec['city']}, {rec['state']} {rec['zip_code']}".strip(' ,')
+                has_name = bool(rec['first_name'])
+                has_addr = bool(rec['address'])
+                tier = "FULL" if (has_name and has_addr) else ("PARTIAL" if (has_name or has_addr) else "NONE→docid")
+                if tier=="FULL": full+=1
+                elif tier.startswith("PARTIAL"): partial+=1
+                else: none+=1
+                log.info(f"  [{lk['id']}] {tier}: name={name!r} addr={addr!r}")
             except Exception as e:
-                log.info(f"err {lk['id']}: {str(e)[:60]}")
+                log.info(f"  [{lk['id']}] ERROR: {str(e)[:80]}")
+        log.info(f"=== RESULTS: {full} full, {partial} partial, {none} fallback (of 5) ===")
         browser.close()
-    return saved
-
-
-def ocr_page1(pdf_path):
-    from pdf2image import convert_from_path
-    import pytesseract
-    log.info(f"=== OCR {os.path.basename(pdf_path)} page 1 ===")
-    try:
-        # Only page 1, decent DPI for accuracy
-        imgs = convert_from_path(pdf_path, dpi=200, first_page=1, last_page=1)
-        if not imgs:
-            log.info("  no image rendered"); return
-        text = pytesseract.image_to_string(imgs[0])
-        log.info(f"  OCR got {len(text)} chars")
-        # Print the full page 1 text, line by line, so we see the format
-        log.info("  ===== BEGIN OCR TEXT =====")
-        for line in text.split('\n'):
-            if line.strip():
-                log.info(f"  | {line.strip()}")
-        log.info("  ===== END OCR TEXT =====")
-    except Exception as e:
-        log.info(f"  OCR err: {str(e)[:120]}")
-
-
-def main():
-    pdfs = get_pdfs(2)
-    for p in pdfs:
-        ocr_page1(p)
-    log.info("=== DONE ===")
 
 if __name__ == '__main__':
     main()
