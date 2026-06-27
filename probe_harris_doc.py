@@ -1,8 +1,7 @@
 """
-Probe v4 — PDF confirmed. Now: download it, save to repo artifact dir,
-and test BOTH text extraction (pdfplumber/pypdf) AND report page count.
-This tells us: embedded text layer (fast) vs needs-OCR (slow).
-Saves the PDF so we can pull it as an artifact and inspect locally.
+Probe v5 — PDFs are scanned images. Run OCR on the first 2 sample docs,
+page 1 (where grantor + property address live on a Notice of Trustee Sale),
+and PRINT the OCR text so we can see the exact format and build the parser.
 """
 import os, logging
 from playwright.sync_api import sync_playwright
@@ -15,11 +14,10 @@ APP_BASE    = "https://www.cclerk.hctx.net/applications/websearch/"
 YEAR_NAME   = 'ctl00$ContentPlaceHolder1$ddlYear'
 MONTH_NAME  = 'ctl00$ContentPlaceHolder1$ddlMonth'
 SEARCH_NAME = 'ctl00$ContentPlaceHolder1$btnSearch'
-
 OUT_DIR = "probe_artifacts"
 
 
-def download_sample_pdfs(n=3):
+def get_pdfs(n=2):
     os.makedirs(OUT_DIR, exist_ok=True)
     saved = []
     with sync_playwright() as pw:
@@ -28,7 +26,6 @@ def download_sample_pdfs(n=3):
         page = ctx.new_page()
         page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page.set_default_timeout(30000)
-
         log.info("Loading portal...")
         page.goto(SEARCH_URL); page.wait_for_load_state('networkidle'); page.wait_for_timeout(1000)
         page.evaluate(f"""() => {{ var s=document.querySelector('select[name="{YEAR_NAME}"]');
@@ -43,59 +40,47 @@ def download_sample_pdfs(n=3):
         except Exception as e:
             log.warning(f"nav: {e}")
         page.wait_for_timeout(2500)
-
-        # Get the first N FRCL links' relative hrefs + doc ids
-        links = page.evaluate("""() => {
-            return Array.from(document.querySelectorAll('a'))
-                .filter(x=>/FRCL/.test(x.textContent||''))
-                .map(a=>({id:a.textContent.trim(), href:a.getAttribute('href')}));
-        }""")
-        log.info(f"Found {len(links)} doc links")
-
-        for i, lk in enumerate(links[:n]):
-            url = APP_BASE + lk['href']
+        links = page.evaluate("""() => Array.from(document.querySelectorAll('a'))
+            .filter(x=>/FRCL/.test(x.textContent||''))
+            .map(a=>({id:a.textContent.trim(), href:a.getAttribute('href')}));""")
+        for lk in links[:n]:
             try:
-                resp = ctx.request.get(url)
-                body = resp.body()
+                body = ctx.request.get(APP_BASE + lk['href']).body()
                 fn = os.path.join(OUT_DIR, f"{lk['id']}.pdf")
-                with open(fn, 'wb') as f:
-                    f.write(body)
-                log.info(f"Saved {lk['id']}.pdf ({len(body)} bytes), header={body[:8]}")
-                saved.append(fn)
+                with open(fn,'wb') as f: f.write(body)
+                saved.append(fn); log.info(f"Saved {lk['id']}.pdf ({len(body)}b)")
             except Exception as e:
-                log.info(f"  {lk['id']} fetch err: {str(e)[:80]}")
-
+                log.info(f"err {lk['id']}: {str(e)[:60]}")
         browser.close()
     return saved
 
 
-def test_text_extraction(pdf_path):
-    log.info(f"--- Testing extraction on {os.path.basename(pdf_path)} ---")
-    # Try pypdf first
+def ocr_page1(pdf_path):
+    from pdf2image import convert_from_path
+    import pytesseract
+    log.info(f"=== OCR {os.path.basename(pdf_path)} page 1 ===")
     try:
-        from pypdf import PdfReader
-        r = PdfReader(pdf_path)
-        npages = len(r.pages)
-        text = ""
-        for pg in r.pages:
-            text += pg.extract_text() or ""
-        log.info(f"  pypdf: {npages} pages, {len(text)} chars of embedded text")
-        if len(text) > 50:
-            log.info(f"  EMBEDDED TEXT FOUND (fast path!): {text[:300].strip()}")
-            return 'text', text
-        else:
-            log.info(f"  No meaningful embedded text → needs OCR")
+        # Only page 1, decent DPI for accuracy
+        imgs = convert_from_path(pdf_path, dpi=200, first_page=1, last_page=1)
+        if not imgs:
+            log.info("  no image rendered"); return
+        text = pytesseract.image_to_string(imgs[0])
+        log.info(f"  OCR got {len(text)} chars")
+        # Print the full page 1 text, line by line, so we see the format
+        log.info("  ===== BEGIN OCR TEXT =====")
+        for line in text.split('\n'):
+            if line.strip():
+                log.info(f"  | {line.strip()}")
+        log.info("  ===== END OCR TEXT =====")
     except Exception as e:
-        log.info(f"  pypdf err: {str(e)[:100]}")
-    return 'ocr', None
+        log.info(f"  OCR err: {str(e)[:120]}")
 
 
 def main():
-    saved = download_sample_pdfs(3)
-    log.info(f"=== Downloaded {len(saved)} PDFs, testing extraction ===")
-    for p in saved:
-        mode, text = test_text_extraction(p)
-    log.info("=== DONE — check artifacts for the PDFs ===")
+    pdfs = get_pdfs(2)
+    for p in pdfs:
+        ocr_page1(p)
+    log.info("=== DONE ===")
 
 if __name__ == '__main__':
     main()
