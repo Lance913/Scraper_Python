@@ -37,6 +37,53 @@ def is_doc_image(url: str) -> bool:
     return ('/files/documents/' in url and '/images/' in url and '.png' in url)
 
 
+def run_search(page, start_fmt, end_fmt, keyword=None):
+    """Fill the advanced-search form (optionally with a doc-type keyword) and
+    submit. Logs whether each field actually filled + the resulting URL and the
+    total number of result rows, so we can tell if the filters applied."""
+    page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
+    page.goto(BASE + '/search/advanced')
+    page.wait_for_load_state('networkidle'); page.wait_for_timeout(1200)
+
+    kw_filled = False
+    if keyword:
+        # v4 proved NTS docs surface via a free-text / doc-type keyword field.
+        for sel in ['input[id*="docType" i]', 'input[placeholder*="Type" i]',
+                    'input[id*="searchText" i]', 'input[placeholder*="eyword" i]',
+                    'input[type="text"]']:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
+                loc.fill(keyword); kw_filled = True
+                log.info(f"keyword {keyword!r} -> {sel}")
+                page.wait_for_timeout(1000)
+                try:
+                    opt = page.locator('[role="option"], li:has-text("TRUSTEE")').first
+                    if opt.count() > 0 and opt.is_visible():
+                        opt.click(); log.info("selected autocomplete option")
+                except Exception:
+                    pass
+                break
+        if not kw_filled:
+            log.info("keyword field NOT found")
+
+    date_filled = False
+    if page.locator('input[id*="start" i]').count() > 0:
+        page.fill('input[id*="start" i]', start_fmt)
+        page.fill('input[id*="end" i]', end_fmt)
+        date_filled = True
+    log.info(f"date_filled={date_filled} ({start_fmt}->{end_fmt})")
+
+    for bsel in ['button[type="submit"]', 'button:has-text("Search")']:
+        b = page.locator(bsel).first
+        if b.count() > 0:
+            b.click(); break
+    page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
+
+    n_rows = page.locator('table tr').count()
+    log.info(f"results URL: {page.url}")
+    log.info(f"total table rows on page 1: {n_rows}")
+
+
 def pick_nts_row(scraper, page):
     """Run the scraper's own NTS parser on the current results page.
 
@@ -80,29 +127,27 @@ def main():
         page.set_default_timeout(30000)
         page.on('response', lambda r: captured.append(r.url) if is_doc_image(r.url) else None)
 
-        log.info(f"Search {COUNTY_NAME} {start_fmt}->{end_fmt} ...")
-        page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(800)
-        page.goto(BASE + '/search/advanced')
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(1200)
-        for s, e in [('input[id*="start" i]', 'input[id*="end" i]')]:
-            if page.locator(s).count() > 0:
-                page.fill(s, start_fmt); page.fill(e, end_fmt); break
-        for bsel in ['button[type="submit"]', 'button:has-text("Search")']:
-            b = page.locator(bsel).first
-            if b.count() > 0:
-                b.click(); break
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
+        def search_and_find(keyword):
+            """Run a search then paginate looking for an NTS row the scraper
+            recognizes. Returns the chosen row dict or None."""
+            log.info(f"=== SEARCH (keyword={keyword!r}) {COUNTY_NAME} ===")
+            run_search(page, start_fmt, end_fmt, keyword=keyword)
+            for page_num in range(1, MAX_PAGES + 1):
+                log.info(f"--- results page {page_num} ---")
+                row = pick_nts_row(scraper, page)
+                if row:
+                    return row
+                if not scraper._next_page(page):
+                    log.info("No more results pages.")
+                    break
+            return None
 
-        # Paginate until we find an NTS row the scraper recognizes.
-        chosen = None
-        for page_num in range(1, MAX_PAGES + 1):
-            log.info(f"--- results page {page_num} ---")
-            chosen = pick_nts_row(scraper, page)
-            if chosen:
-                break
-            if not scraper._next_page(page):
-                log.info("No more results pages.")
-                break
+        # Keyword-filtered search first (v4 proved this surfaces NTS docs),
+        # then fall back to a plain date-range search.
+        chosen = search_and_find('NOTICE OF TRUSTEE')
+        if not chosen:
+            log.info("Keyword search found no NTS rows; retrying date-only.")
+            chosen = search_and_find(None)
 
         if not chosen:
             log.info("No NTS row found to OCR."); browser.close(); return
