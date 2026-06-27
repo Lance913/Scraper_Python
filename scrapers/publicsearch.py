@@ -210,39 +210,44 @@ class PublicSearchScraper(BaseScraper):
     def _enrich_and_build(self, page, context, candidates, captured, is_doc_image) -> List[Dict]:
         records: List[Dict] = []
         deadline = time.monotonic() + OCR_BUDGET_SEC
-        ocr_done = named = 0
+        ocr_done = named = addressed = 0
         for cand in candidates:
             first = last = ''
+            address, city, zip_c = cand['address'], cand['city'], cand['zip_code']
             can_ocr = (cand['doc_id_internal']
                        and ocr_done < OCR_MAX_DOCS
                        and time.monotonic() < deadline)
             if can_ocr:
                 ocr_done += 1
-                first, last = self._ocr_owner(page, context, cand['doc_id_internal'],
-                                              captured, is_doc_image)
+                first, last, o_street, o_city, o_zip = self._ocr_doc(
+                    page, context, cand['doc_id_internal'], captured, is_doc_image)
                 full = f"{first} {last}".strip()
                 if full and not is_residential_lead(full):
                     self.logger.info(f"{self.county}: drop entity owner {full!r}")
                     first = last = ''
-                elif full:
-                    named += 1
+                # Fall back to the OCR'd property address when the table had none
+                # (e.g. Denton). Table address is preferred when present.
+                if not address and o_street:
+                    address, city, zip_c = o_street, o_city, o_zip
+            if first or last:
+                named += 1
+            if address:
+                addressed += 1
             records.append(self.build_record(
                 first_name=first, last_name=last,
-                address=cand['address'], city=cand['city'],
-                state='TX', zip_code=cand['zip_code'],
+                address=address, city=city, state='TX', zip_code=zip_c,
                 file_date=cand['file_date'], sale_date=cand['sale_date'],
                 doc_id=cand['doc_number'],
             ))
         self.logger.info(
             f"{self.county}: built {len(records)} records "
-            f"({named} with owner name, {len(records) - named} address-only; "
-            f"OCR'd {ocr_done})"
+            f"({named} with name, {addressed} with address; OCR'd {ocr_done})"
         )
         return records
 
-    def _ocr_owner(self, page, context, doc_id_internal: str,
-                   captured: List[str], is_doc_image) -> Tuple[str, str]:
-        """Open the doc page, grab the page-1 PNG, OCR it, parse the owner name."""
+    def _ocr_doc(self, page, context, doc_id_internal: str,
+                 captured: List[str], is_doc_image) -> Tuple[str, str, str, str, str]:
+        """Open the doc page, grab the page-1 PNG, OCR it, parse owner + address."""
         try:
             captured.clear()
             page.goto(f"{self.base_url}/doc/{doc_id_internal}", wait_until='domcontentloaded')
@@ -254,12 +259,12 @@ class PublicSearchScraper(BaseScraper):
                 page.wait_for_timeout(250)
             png_url = next((u for u in captured if is_doc_image(u)), None)
             if not png_url:
-                return '', ''
+                return '', '', '', '', ''
             body = context.request.get(png_url).body()
-            return pse.owner_from_png(body)
+            return pse.address_and_owner_from_png(body)
         except Exception as e:
-            self.logger.warning(f"{self.county}: owner OCR error doc {doc_id_internal}: {e}")
-            return '', ''
+            self.logger.warning(f"{self.county}: OCR error doc {doc_id_internal}: {e}")
+            return '', '', '', '', ''
 
     # ── Pagination ────────────────────────────────────────────────────────────
 

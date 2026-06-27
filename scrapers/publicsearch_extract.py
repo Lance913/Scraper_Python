@@ -146,6 +146,78 @@ def split_name(full):
     return first, last.title()
 
 
+# ── Property-address extraction (fallback when the results table has no address,
+#    e.g. Denton). The hard part is NOT picking up the servicer/trustee/law-firm
+#    address — so we anchor on property labels / the barcode "/ ADDR" line / a
+#    header block, and reject any candidate in a servicer/trustee/Suite context.
+
+_ADDR_CORE = r'(\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .\'#-]{2,45}?)\s*,\s*([A-Za-z][A-Za-z .\'-]+?)\s*,?\s*(?:TX|TEXAS)\s*,?\s*(\d{5})'
+
+RE_ADDR_LABELED = re.compile(
+    r'(?:commonly\s+known\s+as|property\s+address|local\s+address|site\s+address|'
+    r'address\s+of\s+(?:the\s+)?property|property\s+to\s+be\s+sold[^:]*)\s*[:\-]?\s*' + _ADDR_CORE,
+    re.I)
+RE_ADDR_SLASH = re.compile(r'/\s*' + _ADDR_CORE, re.I)           # "<file#> / 3532 CRICKET DRIVE, DENTON, TX 76207"
+RE_ADDR_GENERIC = re.compile(_ADDR_CORE, re.I)
+
+RE_CSZ = re.compile(r'^([A-Za-z][A-Za-z .\'-]+?),?\s+(?:TX|TEXAS)\s*,?\s*(\d{5})$', re.I)
+RE_STREET_LINE = re.compile(r'^(\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .\'#-]{2,45}?)(?:\s+\d{6,})?$')
+
+# Contexts that mark an address as the servicer/trustee/law firm, not the property.
+_BAD_ADDR_CTX = re.compile(
+    r'(trustee|servic|mortgagee|beneficiary|attorney|c/o|\bsuite\b|\bste\.?\b|'
+    r'p\.?\s?o\.?\s*box|law\b|title\s+services?)', re.I)
+
+
+def _bad_ctx(text, start):
+    return bool(_BAD_ADDR_CTX.search(text[max(0, start - 70):start]))
+
+
+def _clean_street(s):
+    s = re.sub(r'\s+\d{6,}\s*$', '', s)            # trailing barcode digits
+    return re.sub(r'\s+', ' ', s).strip(' ,.-').title()
+
+
+def _good_zip(z):
+    return z[:2] in ('75', '76', '77', '78', '79')  # Texas metros
+
+
+def parse_address(text):
+    """Best-effort property (street, city, zip) from NTS OCR text, or ('', '', '').
+
+    Prefers labeled / barcode-line / header-block addresses and rejects anything
+    in a servicer/trustee/law-firm context. Returns empty rather than risk
+    writing the law firm's address."""
+    for rx in (RE_ADDR_LABELED, RE_ADDR_SLASH):
+        for m in rx.finditer(text):
+            if _good_zip(m.group(3)) and not _bad_ctx(text, m.start()):
+                return _clean_street(m.group(1)), m.group(2).strip().title(), m.group(3)
+
+    # Header block: a street line immediately followed by "CITY, TX ZIP".
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    for i in range(min(len(lines), 10)):
+        sm = RE_STREET_LINE.match(lines[i])
+        if sm and i + 1 < len(lines):
+            cm = RE_CSZ.match(lines[i + 1])
+            if cm and _good_zip(cm.group(2)):
+                return _clean_street(sm.group(1)), cm.group(1).strip().title(), cm.group(2)
+
+    # Last resort: a generic "street, city, TX zip" not in a bad context.
+    for m in RE_ADDR_GENERIC.finditer(text):
+        if _good_zip(m.group(3)) and not _bad_ctx(text, m.start()):
+            return _clean_street(m.group(1)), m.group(2).strip().title(), m.group(3)
+    return '', '', ''
+
+
+def address_and_owner_from_png(body):
+    """OCR a page-1 PNG once and return (first, last, street, city, zip)."""
+    txt = ocr_png_bytes(body)
+    owner = parse_owner(txt)
+    first, last = split_name(owner) if owner else ('', '')
+    street, city, zip_c = parse_address(txt)
+    return first, last, street, city, zip_c
+
+
 # ── OCR helpers ─────────────────────────────────────────────────────────────
 
 def ocr_png_bytes(body):
@@ -191,3 +263,25 @@ if __name__ == '__main__':
         owner = parse_owner(txt)
         f, l = split_name(owner) if owner else ('', '')
         print(f"{k:12} owner={owner!r:42} -> first={f!r} last={l!r}")
+
+    print("\n--- address ---")
+    ADDR = {
+        'denton_slash': ("26-000055-516-1 / 3532 CRICKET DRIVE, DENTON, TX 76207",
+                         ('3532 Cricket Drive', 'Denton', '76207')),
+        'bexar_known':  ("Commonly known as: 8914 ARABIAN KING, CONVERSE, TEXAS 78109",
+                         ('8914 Arabian King', 'Converse', '78109')),
+        'bexar_local':  ("Local Address: 22915 Savannah Heights, Von Ormy, TX 78073",
+                         ('22915 Savannah Heights', 'Von Ormy', '78073')),
+        'header_block': ("12443 ALSTROEMERIA 00000008006629\nSAN ANTONIO, TX 78253\nNOTICE",
+                         ('12443 Alstroemeria', 'San Antonio', '78253')),
+        # Law-firm / servicer addresses must be REJECTED (-> empty).
+        'lawfirm_trap': ("Mortgage Servicer's Address:\n820 Follin Lane SE, Vienna, VA 22180\n"
+                         "McCarthy & Holthus, LLP\n1255 West 15th Street, Suite 1060\nPlano, TX 75075\n"
+                         "Legal Description: LOT 28, BLOCK 11, LEGEND CREST",
+                         ('', '', '')),
+        'avt_trap':     ("c/o AVT Title Services, LLC, 5177 Richmond Avenue, Suite 1230, Houston, TX 77056",
+                         ('', '', '')),
+    }
+    for k, (txt, exp) in ADDR.items():
+        got = parse_address(txt)
+        print(f"{k:12} {'OK ' if got == exp else 'FAIL'} got={got} exp={exp}")
