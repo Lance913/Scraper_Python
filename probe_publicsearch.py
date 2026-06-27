@@ -1,8 +1,7 @@
 """
-Probe v3 — CONFIRMED: publicsearch serves doc page images at
-  /files/documents/{docId}/images/{imageId}_{page}.png?exp=...&sig=...
-Now: capture that PNG URL from network, download all pages, OCR them,
-and parse owner+address to prove the pipeline works for publicsearch.
+Probe v4 — find an ACTUAL Notice of Trustee Sale doc on publicsearch (not a
+Deed of Trust), OCR all its pages, and print the text so we can see the real
+NTS layout and build the parser. Searches by document-type keyword to surface NTS.
 """
 import re, logging, os
 from datetime import date, timedelta
@@ -16,9 +15,7 @@ BASE = f"https://{SLUG}.tx.publicsearch.us"
 
 
 def main():
-    captured_imgs = []
-    net = []
-    start_fmt = (date(2026,6,27) - timedelta(days=30)).strftime('%m/%d/%Y')
+    start_fmt = (date(2026,6,27) - timedelta(days=120)).strftime('%m/%d/%Y')  # wide range to find NTS
     end_fmt   = date(2026,6,27).strftime('%m/%d/%Y')
 
     with sync_playwright() as pw:
@@ -30,81 +27,111 @@ def main():
         page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page.set_default_timeout(30000)
 
-        def on_resp(r):
-            net.append((r.status, r.headers.get('content-type',''), r.url))
-            # Capture document page images specifically
-            if '/files/documents/' in r.url and '/images/' in r.url and '.png' in r.url:
-                captured_imgs.append(r.url)
-        page.on('response', on_resp)
+        captured = []
+        page.on('response', lambda r: captured.append(r.url)
+                if ('/files/documents/' in r.url and '/images/' in r.url and '.png' in r.url) else None)
 
-        log.info("Navigating to search...")
+        log.info("Searching for NTS documents...")
         page.goto(BASE); page.wait_for_load_state('networkidle'); page.wait_for_timeout(1000)
-        page.goto(BASE + '/search/advanced'); page.wait_for_load_state('networkidle'); page.wait_for_timeout(1000)
+        page.goto(BASE + '/search/advanced'); page.wait_for_load_state('networkidle'); page.wait_for_timeout(1500)
 
-        for s, e in [('input[id*="start" i]','input[id*="end" i]')]:
-            if page.locator(s).count() > 0:
-                page.fill(s, start_fmt); page.fill(e, end_fmt); break
-        for btn_sel in ['button[type="submit"]','button:has-text("Search")']:
-            b = page.locator(btn_sel).first
-            if b.count() > 0:
-                b.click(); break
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(3500)
-
-        cells = page.evaluate("""() => Array.from(document.querySelectorAll('td'))
-            .map(t=>(t.textContent||'').trim()).filter(t=>/^\\d{6,}$/.test(t)).slice(0,3);""")
-        log.info(f"Doc cells: {cells}")
-
-        if not cells:
-            log.info("No doc cells found"); browser.close(); return
-
-        # Click first doc to open viewer
-        captured_imgs.clear()
-        el = page.locator(f'td:has-text("{cells[0]}")').first
-        el.scroll_into_view_if_needed(); el.click()
-        page.wait_for_load_state('networkidle'); page.wait_for_timeout(6000)  # let images load
-        doc_url = page.url
-        log.info(f"Doc page: {doc_url}")
-        doc_id = doc_url.rstrip('/').split('/')[-1]
-
-        log.info(f"Captured {len(captured_imgs)} document image URL(s)")
-        for u in captured_imgs[:5]:
-            log.info(f"  IMG: {u[:160]}")
-
-        if not captured_imgs:
-            log.info("No images captured — viewer may need a page interaction"); browser.close(); return
-
-        # Download the captured page image(s) via the session request API (carries cookies + sig)
-        os.makedirs('/tmp/ps', exist_ok=True)
-        saved = []
-        # de-dup by base image path (ignore repeated)
-        seen = set()
-        for u in captured_imgs:
-            key = u.split('?')[0]
-            if key in seen: continue
-            seen.add(key)
+        # Try to fill a doc-type / keyword field to find Notice of Trustee Sale
+        # publicsearch advanced search usually has a "Document Type" or free-text field
+        typed = False
+        for sel in ['input[id*="docType" i]','input[placeholder*="Type" i]',
+                    'input[id*="searchText" i]','input[placeholder*="eyword" i]',
+                    'input[type="text"]']:
             try:
-                body = ctx.request.get(u).body()
-                fn = f"/tmp/ps/{len(saved)}.png"
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    loc.fill('NOTICE OF TRUSTEE')
+                    log.info(f"typed doc-type into {sel}")
+                    typed = True
+                    page.wait_for_timeout(1000)
+                    # Try selecting an autocomplete option if present
+                    try:
+                        opt = page.locator('[role="option"], li:has-text("TRUSTEE")').first
+                        if opt.count() > 0 and opt.is_visible():
+                            opt.click(); log.info("selected autocomplete option")
+                    except Exception: pass
+                    break
+            except Exception: pass
+
+        # Fill date range too
+        for s, e in [('input[id*="start" i]','input[id*="end" i]')]:
+            try:
+                if page.locator(s).count() > 0:
+                    page.fill(s, start_fmt); page.fill(e, end_fmt)
+                    log.info(f"date {start_fmt}->{end_fmt}"); break
+            except Exception: pass
+
+        for btn_sel in ['button[type="submit"]','button:has-text("Search")']:
+            try:
+                b = page.locator(btn_sel).first
+                if b.count() > 0: b.click(); break
+            except Exception: pass
+        page.wait_for_load_state('networkidle'); page.wait_for_timeout(4000)
+        log.info(f"Results URL: {page.url}")
+
+        # Look at doc-type cells to find an NTS row
+        rows_info = page.evaluate("""() => {
+            var trs = Array.from(document.querySelectorAll('tr'));
+            var out = [];
+            for (var tr of trs) {
+                var txt = (tr.textContent||'');
+                if (/NOTICE|TRUSTEE/i.test(txt)) {
+                    var nums = (txt.match(/\\d{6,}/g)||[]);
+                    out.push({text: txt.slice(0,120), docnum: nums[0]||''});
+                }
+            }
+            return out.slice(0,8);
+        }""")
+        log.info(f"Found {len(rows_info)} rows mentioning NOTICE/TRUSTEE:")
+        for r in rows_info:
+            log.info(f"  doc={r['docnum']} | {r['text']}")
+
+        # Click the first NTS row's doc number
+        target = next((r['docnum'] for r in rows_info if r['docnum']), None)
+        if not target:
+            log.info("No NTS doc found in results; printing all doc-type cells for reference")
+            dts = page.evaluate("""() => Array.from(document.querySelectorAll('td'))
+                .map(t=>(t.textContent||'').trim()).filter(t=>/[A-Z]{3,}/.test(t)).slice(0,20);""")
+            log.info(f"Doc types visible: {dts}")
+            browser.close(); return
+
+        log.info(f"Opening NTS doc {target}...")
+        captured.clear()
+        el = page.locator(f'td:has-text("{target}")').first
+        el.scroll_into_view_if_needed(); el.click()
+        page.wait_for_load_state('networkidle'); page.wait_for_timeout(6000)
+        log.info(f"Doc page: {page.url}")
+
+        log.info(f"Captured {len(captured)} image(s)")
+        if not captured:
+            browser.close(); return
+
+        os.makedirs('/tmp/ps', exist_ok=True)
+        saved=[]; seen=set()
+        for u in captured:
+            k=u.split('?')[0]
+            if k in seen: continue
+            seen.add(k)
+            try:
+                body=ctx.request.get(u).body()
+                fn=f"/tmp/ps/{len(saved)}.png"
                 with open(fn,'wb') as f: f.write(body)
                 saved.append(fn)
-                log.info(f"  saved {fn}: {len(body)} bytes, header={body[:8]}")
-            except Exception as ex:
-                log.info(f"  dl err: {str(ex)[:60]}")
+            except Exception as e: log.info(f"dl err {str(e)[:50]}")
+        log.info(f"saved {len(saved)} page image(s)")
 
-        # OCR the images
-        try:
-            import pytesseract
-            from PIL import Image
-            log.info("=== OCR of document page(s) ===")
-            full_text = ""
-            for fn in saved[:3]:
-                txt = pytesseract.image_to_string(Image.open(fn))
-                full_text += txt + "\n"
-                log.info(f"--- {fn}: {len(txt)} chars ---")
-                for ln in txt.split('\n'):
-                    if ln.strip(): log.info(f"  | {ln.strip()}")
-        except Exception as ex:
-            log.info(f"OCR err: {str(ex)[:100]}")
+        import pytesseract
+        from PIL import Image
+        log.info("===== NTS DOCUMENT OCR =====")
+        for fn in saved[:2]:
+            txt = pytesseract.image_to_string(Image.open(fn))
+            log.info(f"----- {fn} ({len(txt)} chars) -----")
+            for ln in txt.split('\n'):
+                if ln.strip(): log.info(f"  | {ln.strip()}")
 
         browser.close()
 
