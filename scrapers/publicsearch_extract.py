@@ -85,6 +85,7 @@ JUNK_TOKENS = {
     'GRANTEE', 'MORTGAGOR', 'BORROWER', 'DEBTOR', 'TRUSTEE', 'TRUSTOR', 'MAKER',
     'PAYEE', 'LENDER', 'SATX', 'TX', 'TEXAS', 'TPI', 'VNC', 'NA', 'TBD',
     'ITS', 'SUCCESSOR', 'SUCCESSORS', 'ASSIGN', 'ASSIGNS', 'NOMINEE', 'AKA',
+    'PURCHASER', 'PURCHASERS', 'INTEREST', 'PROPERTY', 'NOTICE', 'SALE',
 }
 NAME_SUFFIXES = {'JR', 'SR', 'II', 'III', 'IV', 'V'}
 
@@ -163,14 +164,20 @@ RE_ADDR_GENERIC = re.compile(_ADDR_CORE, re.I)
 RE_CSZ = re.compile(r'^([A-Za-z][A-Za-z .\'-]+?),?\s+(?:TX|TEXAS)\s*,?\s*(\d{5})$', re.I)
 RE_STREET_LINE = re.compile(r'^(\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .\'#-]{2,45}?)(?:\s+\d{6,})?$')
 
-# Contexts that mark an address as the servicer/trustee/law firm, not the property.
+# Contexts that mark an address as NOT the property: the servicer/trustee/law
+# firm, OR the county sale location (courthouse / clerk / place of sale).
 _BAD_ADDR_CTX = re.compile(
     r'(trustee|servic|mortgagee|beneficiary|attorney|c/o|\bsuite\b|\bste\.?\b|'
-    r'p\.?\s?o\.?\s*box|law\b|title\s+services?)', re.I)
+    r'p\.?\s?o\.?\s*box|law\b|title\s+services?|'
+    r'courthouse|court\s*house|courts?\s+building|place\s+of\s+sale|commissioner|'
+    r'designated\s+by|county\s+clerk|\bclerk\b|filed\s+and\s+recorded|recording\s+requested)',
+    re.I)
 
 
 def _bad_ctx(text, start):
-    return bool(_BAD_ADDR_CTX.search(text[max(0, start - 70):start]))
+    # Check a wide window on both sides — the courthouse/clerk label can trail
+    # the address (e.g. "... 1450 E McKinney St, Denton TX 76209  Denton County Clerk").
+    return bool(_BAD_ADDR_CTX.search(text[max(0, start - 120):start + 110]))
 
 
 def _clean_street(s):
@@ -281,6 +288,13 @@ if __name__ == '__main__':
                          ('', '', '')),
         'avt_trap':     ("c/o AVT Title Services, LLC, 5177 Richmond Avenue, Suite 1230, Houston, TX 77056",
                          ('', '', '')),
+        # County sale-location / clerk addresses must be REJECTED.
+        'courthouse':   ("Place of Sale: Denton County Courts Building, "
+                         "1450 East Mckinney Street, Denton, TX 76209", ('', '', '')),
+        'clerk_trail':  ("1450 East Mckinney Street, Denton, TX 76209 Denton County Clerk", ('', '', '')),
+        # A real property line near a file number still works.
+        'real_after':   ("Cause No 2025-1234 / 330 Brook Cove Ln, Lewisville, TX 75067",
+                         ('330 Brook Cove Ln', 'Lewisville', '75067')),
     }
     for k, (txt, exp) in ADDR.items():
         got = parse_address(txt)
