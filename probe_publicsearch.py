@@ -59,6 +59,16 @@ def inspect(pw, slug):
         log.info(f"{slug}: count={info['countPhrase']} noResultsMsg={info['noResultsMsg']}")
         for t in info['tables']:
             log.info(f"{slug}: table headers={t['headers']} rows={t['rows']}")
+        rows = page.evaluate("""() => {
+            const t=document.querySelector('table'); if(!t) return [];
+            const heads=[...t.querySelectorAll('th')].map(h=>(h.textContent||'').trim());
+            const out=[heads];
+            for(const tr of [...t.querySelectorAll('tr')].slice(1,7))
+                out.push([...tr.querySelectorAll('td')].map(td=>(td.textContent||'').trim()));
+            return out;
+        }""")
+        for r in rows:
+            log.info(f"{slug} ROW: {r}")
         if not info['tables'] or info['noResultsMsg']:
             log.info(f"{slug}: BODY TEXT (first 40 lines):")
             for ln in info['bodyHead']:
