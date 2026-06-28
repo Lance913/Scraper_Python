@@ -214,6 +214,9 @@ class PublicSearchScraper(BaseScraper):
         for cand in candidates:
             first = last = ''
             address, city, zip_c = cand['address'], cand['city'], cand['zip_code']
+            # Drop courthouse/clerk/commercial addresses from the table.
+            if address and pse.is_nonproperty_address(address):
+                address = city = zip_c = ''
             can_ocr = (cand['doc_id_internal']
                        and ocr_done < OCR_MAX_DOCS
                        and time.monotonic() < deadline)
@@ -227,7 +230,7 @@ class PublicSearchScraper(BaseScraper):
                     first = last = ''
                 # Fall back to the OCR'd property address when the table had none
                 # (e.g. Denton). Table address is preferred when present.
-                if not address and o_street:
+                if not address and o_street and not pse.is_nonproperty_address(o_street):
                     address, city, zip_c = o_street, o_city, o_zip
             if first or last:
                 named += 1

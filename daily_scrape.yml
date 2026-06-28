@@ -1,0 +1,78 @@
+name: Daily TX Foreclosure Scraper
+
+on:
+  schedule:
+    - cron: '0 13 * * *'   # 7:00 AM CST (UTC-6)
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date to scrape (YYYY-MM-DD). Leave blank for today.'
+        required: false
+        default: ''
+      counties:
+        description: 'Counties: harris bexar dallas tarrant denton johnson'
+        required: false
+        default: 'harris bexar dallas tarrant denton johnson'
+      dry_run:
+        description: 'Dry run? (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  scrape:
+    name: Scrape foreclosure data
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright + Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Install Chromium system deps (cached run)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
+
+      - name: Build CLI arguments
+        id: args
+        run: |
+          ARGS=""
+          DATE="${{ github.event.inputs.date }}"
+          if [ -n "$DATE" ]; then ARGS="$ARGS --date $DATE"; fi
+          COUNTIES="${{ github.event.inputs.counties }}"
+          if [ -n "$COUNTIES" ]; then ARGS="$ARGS --counties $COUNTIES"; fi
+          DRY="${{ github.event.inputs.dry_run }}"
+          if [ "$DRY" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "cli_args=$ARGS" >> $GITHUB_OUTPUT
+
+      - name: Run scraper
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: python main.py ${{ steps.args.outputs.cli_args }}
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-logs-${{ github.run_id }}
+          path: '*.log'
+          if-no-files-found: ignore

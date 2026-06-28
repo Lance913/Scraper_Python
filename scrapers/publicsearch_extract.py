@@ -216,6 +216,24 @@ def parse_address(text):
     return '', '', ''
 
 
+# Known non-property addresses (county courthouse / clerk / sale locations) and
+# commercial markers — these must never be written as a homeowner's property,
+# whether they come from OCR or from the results table.
+_BLOCKLIST_STREETS = [
+    ('1450', 'mckinney'),     # Denton County Courts / Records building
+    ('100', 'dolorosa'),      # Bexar County Courthouse
+]
+
+
+def is_nonproperty_address(street: str) -> bool:
+    s = (street or '').lower()
+    if not s:
+        return False
+    if re.search(r'\b(suite|ste)\b', s):     # commercial/office, not a homeowner
+        return True
+    return any(num in s and name in s for num, name in _BLOCKLIST_STREETS)
+
+
 def address_and_owner_from_png(body):
     """OCR a page-1 PNG once and return (first, last, street, city, zip)."""
     txt = ocr_png_bytes(body)
