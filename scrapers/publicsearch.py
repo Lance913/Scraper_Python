@@ -70,21 +70,28 @@ def is_nts(doc_type: str) -> bool:
     return 'FORECLOS' in dt or 'TRUSTEE' in dt
 
 
-# JS that parses the FC results table into row dicts (incl. internal docId).
+# JS that parses the FC results table into row dicts, tolerant of the two known
+# column schemas:
+#   A (Bexar/Dallas/Denton/Johnson): Doc Type | Recorded Date | Sale Date |
+#                                    Doc Number | Remarks | Property Address
+#   B (Tarrant):                     Grantor | Sale Date | Filed Date | Property Address
+# Columns are matched by header name; missing ones come back as ''.
 _PARSE_ROWS_JS = """() => {
     const out = []; const t = document.querySelector('table'); if (!t) return out;
     const heads = Array.from(t.querySelectorAll('th')).map(h => (h.textContent||'').trim().toLowerCase());
-    const idx = n => heads.findIndex(h => h.includes(n));
-    const di=idx('doc type'), rd=idx('recorded'), sd=idx('sale date'),
-          dn=idx('doc number'), rm=idx('remark'), pa=idx('property address');
-    if (di < 0) return out;
+    const idx = (...names) => { for (const n of names) { const i = heads.findIndex(h => h.includes(n)); if (i >= 0) return i; } return -1; };
+    const gi=idx('grantor'), di=idx('doc type'), rd=idx('recorded','filed'),
+          sd=idx('sale date'), dn=idx('doc number','instrument'),
+          rm=idx('remark'), pa=idx('property address','legal');
+    const get = (c, i) => (i >= 0 && i < c.length) ? c[i] : '';
     for (const tr of Array.from(t.querySelectorAll('tr')).slice(1)) {
         const c = Array.from(tr.querySelectorAll('td')).map(td => (td.textContent||'').trim());
         if (!c.length) continue;
         const cb = tr.querySelector('input[id^="table-checkbox-"]');
         out.push({
-            doc_type: c[di]||'', recorded: c[rd]||'', sale_date: c[sd]||'',
-            doc_number: c[dn]||'', remarks: c[rm]||'', property_address: c[pa]||'',
+            grantor: get(c, gi), doc_type: get(c, di), recorded: get(c, rd),
+            sale_date: get(c, sd), doc_number: get(c, dn), remarks: get(c, rm),
+            property_address: get(c, pa),
             doc_id: cb ? cb.id.replace('table-checkbox-','') : '',
         });
     }
@@ -182,20 +189,34 @@ class PublicSearchScraper(BaseScraper):
             rows = page.evaluate(_PARSE_ROWS_JS)
             kept = 0
             for r in rows:
-                if not is_nts(r['doc_type']):
+                # Doc-type filter only applies to schemas that have the column;
+                # in the FC department a row with no doc type is still a foreclosure.
+                if r['doc_type'] and not is_nts(r['doc_type']):
                     continue
-                sale = self._fmt(r['sale_date'])
-                if not self._is_upcoming(sale, target_date):
+
+                # Name from the table grantor when present (Tarrant: "LAST FIRST").
+                first = last = ''
+                if r['grantor']:
+                    if not is_residential_lead(r['grantor']):
+                        continue  # builder / HOA / LLC
+                    first, last = self.parse_table_grantor(r['grantor'])
+
+                sale_disp, sale_cmp, coarse = self._sale_info(r['sale_date'])
+                if not self._is_upcoming(sale_cmp, coarse, target_date):
                     continue
+
                 key = r['doc_number'] or r['doc_id']
                 if not key or key in seen_docs:
                     continue
                 seen_docs.add(key)
-                street, city, zip_c = self._split_address(r['property_address'])
+
+                street, city, zip_c = self._table_address(r['property_address'])
                 candidates.append({
                     'doc_id_internal': r['doc_id'],
-                    'doc_number': r['doc_number'],
-                    'sale_date': sale,
+                    'doc_number': r['doc_number'] or r['doc_id'],
+                    'first': first, 'last': last,
+                    'sale_date': sale_disp,
+                    'sale_cmp': sale_cmp,
                     'file_date': self._fmt(r['recorded']),
                     'address': street, 'city': city, 'zip_code': zip_c,
                 })
@@ -203,8 +224,8 @@ class PublicSearchScraper(BaseScraper):
             self.logger.info(f"{self.county}: page {page_num} -> {len(rows)} rows, {kept} upcoming NTS")
             if not self._next_page(page):
                 break
-        # Soonest sales first, so the most urgent leads get names within budget.
-        candidates.sort(key=lambda c: self._sort_key(c['sale_date']))
+        # Soonest sales first, so the most urgent leads get OCR'd within budget.
+        candidates.sort(key=lambda c: c['sale_cmp'] or date.max)
         return candidates
 
     def _enrich_and_build(self, page, context, candidates, captured, is_doc_image) -> List[Dict]:
@@ -212,24 +233,26 @@ class PublicSearchScraper(BaseScraper):
         deadline = time.monotonic() + OCR_BUDGET_SEC
         ocr_done = named = addressed = 0
         for cand in candidates:
-            first = last = ''
+            first, last = cand['first'], cand['last']          # from table grantor, if any
             address, city, zip_c = cand['address'], cand['city'], cand['zip_code']
             # Drop courthouse/clerk/commercial addresses from the table.
             if address and pse.is_nonproperty_address(address):
                 address = city = zip_c = ''
-            can_ocr = (cand['doc_id_internal']
+            # OCR only to fill what the table didn't give us (name and/or address).
+            needs = (not (first or last)) or (not address)
+            can_ocr = (needs and cand['doc_id_internal']
                        and ocr_done < OCR_MAX_DOCS
                        and time.monotonic() < deadline)
             if can_ocr:
                 ocr_done += 1
-                first, last, o_street, o_city, o_zip = self._ocr_doc(
+                o_first, o_last, o_street, o_city, o_zip = self._ocr_doc(
                     page, context, cand['doc_id_internal'], captured, is_doc_image)
-                full = f"{first} {last}".strip()
-                if full and not is_residential_lead(full):
-                    self.logger.info(f"{self.county}: drop entity owner {full!r}")
-                    first = last = ''
-                # Fall back to the OCR'd property address when the table had none
-                # (e.g. Denton). Table address is preferred when present.
+                if not (first or last):
+                    full = f"{o_first} {o_last}".strip()
+                    if full and not is_residential_lead(full):
+                        self.logger.info(f"{self.county}: drop entity owner {full!r}")
+                    elif full:
+                        first, last = o_first, o_last
                 if not address and o_street and not pse.is_nonproperty_address(o_street):
                     address, city, zip_c = o_street, o_city, o_zip
             if first or last:
@@ -287,18 +310,60 @@ class PublicSearchScraper(BaseScraper):
 
     # ── Utilities ─────────────────────────────────────────────────────────────
 
-    def _is_upcoming(self, sale_date: str, target_date: date) -> bool:
-        try:
-            return datetime.strptime(sale_date, '%m/%d/%Y').date() >= target_date
-        except Exception:
-            return False  # no parseable sale date -> skip (can't confirm upcoming)
+    _MONTHS = {m: i for i, m in enumerate(
+        ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+         'jul', 'aug', 'sep', 'oct', 'nov', 'dec'], start=1)}
+
+    def _sale_info(self, raw: str) -> Tuple[str, Optional[date], bool]:
+        """Parse a sale date. Returns (display, comparable_date, is_coarse).
+
+        Handles precise 'mm/dd/yyyy' and Tarrant's coarse 'Jul 2026' (month only)."""
+        raw = (raw or '').strip()
+        m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', raw)
+        if m:
+            mm, dd, yy = (int(x) for x in m.groups())
+            try:
+                return f"{mm:02d}/{dd:02d}/{yy}", date(yy, mm, dd), False
+            except ValueError:
+                return raw, None, False
+        m = re.match(r'^([A-Za-z]{3,9})\.?\s+(\d{4})$', raw)
+        if m:
+            mon = self._MONTHS.get(m.group(1)[:3].lower())
+            if mon:
+                yy = int(m.group(2))
+                # Display as "Jul 2026"; compare on the first of that month.
+                return f"{m.group(1).title()[:3]} {yy}", date(yy, mon, 1), True
+        return raw, None, False
+
+    def _is_upcoming(self, sale_cmp: Optional[date], coarse: bool, target_date: date) -> bool:
+        if sale_cmp is None:
+            return False  # unparseable sale date -> can't confirm upcoming
+        if coarse:
+            # Month-only: keep current month and later (can't tell the exact day).
+            return (sale_cmp.year, sale_cmp.month) >= (target_date.year, target_date.month)
+        return sale_cmp >= target_date
 
     @staticmethod
-    def _sort_key(sale_date: str):
-        try:
-            return datetime.strptime(sale_date, '%m/%d/%Y').date()
-        except Exception:
-            return date.max
+    def parse_table_grantor(g: str) -> Tuple[str, str]:
+        """Tarrant grantor is 'LASTNAME FIRSTNAME [MIDDLE]' -> (first, last)."""
+        g = re.sub(r'\s+(ET\s+AL|ET\s+UX|AND\b|&).*$', '', g, flags=re.I).strip(' ,.')
+        parts = [p for p in g.split() if p]
+        if not parts:
+            return '', ''
+        if len(parts) == 1:
+            return '', parts[0].title()
+        return parts[1].title(), parts[0].title()
+
+    def _table_address(self, raw: str) -> Tuple[str, str, str]:
+        """Parse a table Property Address. Returns ('','','') for a legal
+        description (LOT/BLOCK/no street number) — those get an OCR fallback."""
+        raw = (raw or '').strip()
+        if not raw or raw.upper() in ('N/A', ''):
+            return '', '', ''
+        # Legal descriptions ("LOT 14 BLOCK 4 ...", "BEING LOT 1 ...") aren't a street.
+        if not re.match(r'^\d{1,6}\s+\S', raw) or re.search(r'\b(LOT|BLOCK|ABST|TRACT)\b', raw, re.I):
+            return '', '', ''
+        return self._split_address(raw)
 
     @staticmethod
     def _split_address(raw: str) -> Tuple[str, str, str]:
