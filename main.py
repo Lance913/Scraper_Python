@@ -64,8 +64,10 @@ def parse_args():
 
 
 def _useful(r: Dict) -> bool:
-    """A record is only a lead if it has an address or a name to skip-trace."""
-    return bool(r.get('address') or r.get('first_name') or r.get('last_name'))
+    """Keep every upcoming filing that has any identifying field — a name, an
+    address, or at least a Doc ID reference (so nothing is silently dropped)."""
+    return bool(r.get('first_name') or r.get('last_name')
+                or r.get('address') or r.get('doc_id'))
 
 
 def load_records(patterns: List[str]) -> List[Dict]:

@@ -31,7 +31,7 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from .base import BaseScraper
+from .base import BaseScraper, launch_chromium
 from . import publicsearch_extract as pse
 
 # ── Tunables (env-overridable so the workflow can trade runtime for coverage) ──
@@ -110,7 +110,13 @@ class PublicSearchScraper(BaseScraper):
 
     def scrape(self, target_date: date) -> List[Dict]:
         self.logger.info(f"Scraping {self.county} County for {target_date}")
+        # Playwright is the primary engine (fast, and it can OCR doc images for the
+        # owner name/address). If it can't run at all, fall back to Selenium, which
+        # still captures every table row (name/address/dates) — just no OCR enrichment.
         records = self._playwright_scrape(target_date)
+        if records is None:
+            self.logger.warning(f"{self.county}: Playwright unavailable — Selenium fallback (table only)")
+            records = self._selenium_scrape(target_date)
         if records is None:
             records = []
         self.logger.info(f"{self.county}: {len(records)} NTS records")
@@ -137,10 +143,7 @@ class PublicSearchScraper(BaseScraper):
 
         try:
             with sync_playwright() as pw:
-                browser = pw.chromium.launch(
-                    headless=True,
-                    args=['--disable-blink-features=AutomationControlled'],
-                )
+                browser = launch_chromium(pw)
                 context = browser.new_context(user_agent=(
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                     '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
@@ -182,6 +185,143 @@ class PublicSearchScraper(BaseScraper):
             self.logger.error(f"{self.county}: error: {exc}", exc_info=True)
             return None
 
+    def _row_to_candidate(self, r: Dict, target_date: date, seen_docs: set) -> Optional[Dict]:
+        """Turn one parsed table row into an upcoming-NTS candidate, or None.
+
+        Engine-agnostic: `r` comes from Playwright's JS parser or the BeautifulSoup
+        parser (Selenium fallback) — same keys either way."""
+        # Doc-type filter only applies to schemas that have the column; in the FC
+        # department a row with no doc type is still a foreclosure.
+        if r.get('doc_type') and not is_nts(r['doc_type']):
+            return None
+        # Name from the table grantor when present (Tarrant: "LAST FIRST").
+        first = last = ''
+        if r.get('grantor'):
+            if not is_residential_lead(r['grantor']):
+                return None  # builder / HOA / LLC
+            first, last = self.parse_table_grantor(r['grantor'])
+        sale_disp, sale_cmp, coarse = self._sale_info(r.get('sale_date', ''))
+        if not self._is_upcoming(sale_cmp, coarse, target_date):
+            return None
+        key = r.get('doc_number') or r.get('doc_id')
+        if not key or key in seen_docs:
+            return None
+        seen_docs.add(key)
+        street, city, zip_c = self._table_address(r.get('property_address', ''))
+        return {
+            'doc_id_internal': r.get('doc_id', ''),
+            'doc_number': r.get('doc_number') or r.get('doc_id', ''),
+            'first': first, 'last': last,
+            'sale_date': sale_disp, 'sale_cmp': sale_cmp,
+            'file_date': self._fmt(r.get('recorded', '')),
+            'address': street, 'city': city, 'zip_code': zip_c,
+        }
+
+    # ── Selenium fallback (table-only; used only if Playwright can't run) ───────
+
+    def _parse_rows_html(self, html: str) -> List[Dict]:
+        """BeautifulSoup equivalent of _PARSE_ROWS_JS, for the Selenium path."""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, 'lxml')
+        table = soup.find('table')
+        if not table:
+            return []
+        heads = [th.get_text(' ', strip=True).lower() for th in table.find_all('th')]
+
+        def idx(*names):
+            for n in names:
+                for i, h in enumerate(heads):
+                    if n in h:
+                        return i
+            return -1
+
+        gi, di = idx('grantor'), idx('doc type')
+        rd, sd = idx('recorded', 'filed'), idx('sale date')
+        dn, rm = idx('doc number', 'instrument'), idx('remark')
+        pa = idx('property address', 'legal')
+        rows = []
+        for tr in table.find_all('tr')[1:]:
+            c = [td.get_text(' ', strip=True) for td in tr.find_all('td')]
+            if not c:
+                continue
+
+            def g(i, _c=c):
+                return _c[i] if 0 <= i < len(_c) else ''
+
+            cb = tr.find('input', id=re.compile(r'^table-checkbox-'))
+            doc_id = cb['id'].replace('table-checkbox-', '') if cb and cb.get('id') else ''
+            rows.append({
+                'grantor': g(gi), 'doc_type': g(di), 'recorded': g(rd), 'sale_date': g(sd),
+                'doc_number': g(dn), 'remarks': g(rm), 'property_address': g(pa), 'doc_id': doc_id,
+            })
+        return rows
+
+    def _selenium_scrape(self, target_date: date) -> Optional[List[Dict]]:
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
+        except ImportError:
+            self.logger.error(f"{self.county}: selenium not installed")
+            return None
+
+        start = (target_date - timedelta(days=WINDOW_DAYS)).strftime('%Y%m%d')
+        end = target_date.strftime('%Y%m%d')
+        results_url = (f"{self.base_url}/results?department=FC"
+                       f"&recordedDateRange={start},{end}&searchType=advancedSearch")
+
+        opts = Options()
+        for a in ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage',
+                  '--disable-blink-features=AutomationControlled', '--window-size=1400,1800']:
+            opts.add_argument(a)
+        opts.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                          'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+        try:
+            driver = webdriver.Chrome(options=opts)   # Selenium Manager fetches chromedriver
+        except Exception as exc:
+            self.logger.error(f"{self.county}: selenium chrome launch failed: {exc}")
+            return None
+
+        try:
+            import time as _t
+            driver.get(self.base_url); _t.sleep(2)
+            self.logger.info(f"{self.county}[selenium]: FC results -> {results_url}")
+            driver.get(results_url); _t.sleep(5)
+
+            candidates, seen = [], set()
+            for page_num in range(1, MAX_PAGES + 1):
+                rows = self._parse_rows_html(driver.page_source)
+                kept = 0
+                for r in rows:
+                    cand = self._row_to_candidate(r, target_date, seen)
+                    if cand:
+                        candidates.append(cand); kept += 1
+                self.logger.info(f"{self.county}[selenium]: page {page_num} -> {len(rows)} rows, {kept} upcoming")
+                try:
+                    nxt = driver.find_element(By.CSS_SELECTOR, '[aria-label="next page"]')
+                    if not nxt.is_enabled():
+                        break
+                    nxt.click(); _t.sleep(2.5)
+                except Exception:
+                    break
+
+            # Table-only records (no OCR enrichment in the fallback path).
+            records = [self.build_record(
+                first_name=c['first'], last_name=c['last'],
+                address=c['address'], city=c['city'], state='TX', zip_code=c['zip_code'],
+                file_date=c['file_date'], sale_date=c['sale_date'], doc_id=c['doc_number'],
+            ) for c in candidates]
+            self.logger.info(f"{self.county}[selenium]: built {len(records)} records (table-only)")
+            return records
+        except Exception as exc:
+            self.logger.error(f"{self.county}: selenium error: {exc}", exc_info=True)
+            return None
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
     def _collect_candidates(self, page, target_date: date) -> List[Dict]:
         candidates: List[Dict] = []
         seen_docs = set()
@@ -189,38 +329,10 @@ class PublicSearchScraper(BaseScraper):
             rows = page.evaluate(_PARSE_ROWS_JS)
             kept = 0
             for r in rows:
-                # Doc-type filter only applies to schemas that have the column;
-                # in the FC department a row with no doc type is still a foreclosure.
-                if r['doc_type'] and not is_nts(r['doc_type']):
-                    continue
-
-                # Name from the table grantor when present (Tarrant: "LAST FIRST").
-                first = last = ''
-                if r['grantor']:
-                    if not is_residential_lead(r['grantor']):
-                        continue  # builder / HOA / LLC
-                    first, last = self.parse_table_grantor(r['grantor'])
-
-                sale_disp, sale_cmp, coarse = self._sale_info(r['sale_date'])
-                if not self._is_upcoming(sale_cmp, coarse, target_date):
-                    continue
-
-                key = r['doc_number'] or r['doc_id']
-                if not key or key in seen_docs:
-                    continue
-                seen_docs.add(key)
-
-                street, city, zip_c = self._table_address(r['property_address'])
-                candidates.append({
-                    'doc_id_internal': r['doc_id'],
-                    'doc_number': r['doc_number'] or r['doc_id'],
-                    'first': first, 'last': last,
-                    'sale_date': sale_disp,
-                    'sale_cmp': sale_cmp,
-                    'file_date': self._fmt(r['recorded']),
-                    'address': street, 'city': city, 'zip_code': zip_c,
-                })
-                kept += 1
+                cand = self._row_to_candidate(r, target_date, seen_docs)
+                if cand:
+                    candidates.append(cand)
+                    kept += 1
             self.logger.info(f"{self.county}: page {page_num} -> {len(rows)} rows, {kept} upcoming NTS")
             if not self._next_page(page):
                 break

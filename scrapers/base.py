@@ -21,6 +21,27 @@ HEADERS = {
 }
 
 
+def launch_chromium(pw, **kwargs):
+    """Launch headless Chromium, self-healing if the browser binary is missing.
+
+    On GitHub Actions a stale Playwright cache can leave the Chromium build absent
+    ("Executable doesn't exist"), which would silently lose an entire county. If
+    that happens we install the browser at runtime and retry once."""
+    import subprocess
+    import sys
+    args = kwargs.pop('args', ['--disable-blink-features=AutomationControlled'])
+    try:
+        return pw.chromium.launch(headless=True, args=args, **kwargs)
+    except Exception as exc:
+        msg = str(exc)
+        if "Executable doesn't exist" in msg or 'playwright install' in msg:
+            logging.getLogger('base').warning("Chromium missing — installing at runtime…")
+            subprocess.run([sys.executable, '-m', 'playwright', 'install', 'chromium'],
+                           check=False)
+            return pw.chromium.launch(headless=True, args=args, **kwargs)
+        raise
+
+
 class BaseScraper:
     """Shared utilities for all county scrapers."""
 

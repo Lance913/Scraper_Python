@@ -75,9 +75,8 @@ class HarrisCountyScraper(BaseScraper):
 
         try:
             with sync_playwright() as pw:
-                browser = pw.chromium.launch(
-                    headless=True,
-                    args=['--disable-blink-features=AutomationControlled'])
+                from .base import launch_chromium
+                browser = launch_chromium(pw)
                 ctx = browser.new_context(accept_downloads=True)
                 page = ctx.new_page()
                 page.add_init_script(
