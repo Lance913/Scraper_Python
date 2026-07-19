@@ -327,6 +327,10 @@ class PublicSearchScraper(BaseScraper):
         seen_docs = set()
         for page_num in range(1, MAX_PAGES + 1):
             rows = page.evaluate(_PARSE_ROWS_JS)
+            if not rows and page_num > 1:
+                # Table may still be rendering — wait and re-parse once before trusting 0.
+                page.wait_for_timeout(2500)
+                rows = page.evaluate(_PARSE_ROWS_JS)
             kept = 0
             for r in rows:
                 cand = self._row_to_candidate(r, target_date, seen_docs)
@@ -334,6 +338,8 @@ class PublicSearchScraper(BaseScraper):
                     candidates.append(cand)
                     kept += 1
             self.logger.info(f"{self.county}: page {page_num} -> {len(rows)} rows, {kept} upcoming NTS")
+            if not rows and page_num > 1:
+                break  # genuinely empty after retry -> end of results
             if not self._next_page(page):
                 break
         # Soonest sales first, so the most urgent leads get OCR'd within budget.
@@ -406,15 +412,38 @@ class PublicSearchScraper(BaseScraper):
 
     # ── Pagination ────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _first_row_sig(page) -> str:
+        """Signature of the first data row — used to detect a real page change."""
+        try:
+            return page.evaluate(
+                "() => { const t=document.querySelector('table'); if(!t) return '';"
+                " const r=t.querySelector('tr:nth-child(2)'); return r ? r.innerText.slice(0,120):''; }"
+            ) or ''
+        except Exception:
+            return ''
+
     def _next_page(self, page) -> bool:
+        """Advance to the next results page, WAITING for the table to actually
+        re-render (the React table refreshes async; a fixed sleep parsed empty/
+        stale pages and truncated whole counties)."""
         for sel in ['[aria-label="next page"]', 'button:has-text("Next")',
                     'a:has-text("Next")', '[aria-label="Next"]']:
             try:
                 el = page.locator(sel).first
                 if el.count() > 0 and el.is_visible() and el.is_enabled():
+                    before = self._first_row_sig(page)
                     el.click()
-                    page.wait_for_load_state('networkidle')
-                    page.wait_for_timeout(2000)
+                    # Wait until the first row's text differs from before the click.
+                    try:
+                        page.wait_for_function(
+                            "(prev) => { const t=document.querySelector('table'); if(!t) return false;"
+                            " const r=t.querySelector('tr:nth-child(2)');"
+                            " return !!r && r.innerText.slice(0,120) !== prev; }",
+                            arg=before, timeout=12000)
+                    except Exception:
+                        page.wait_for_timeout(2000)  # fall back to a short wait
+                    page.wait_for_timeout(400)
                     return True
             except Exception:
                 pass
