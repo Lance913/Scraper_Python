@@ -1,0 +1,128 @@
+"""
+Google Sheets Writer
+
+Dedup key: first_name + last_name + county + file_date
+  - If address exists, also include it for extra precision
+  - Avoids the bug where empty address + empty sale_date collapses all county
+    records to a single key (|bexar| etc.)
+"""
+
+import os
+import json
+import logging
+from typing import List, Dict
+
+import gspread
+from google.oauth2.service_account import Credentials
+
+logger = logging.getLogger('sheets_writer')
+
+SPREADSHEET_ID = '1_GocjgjF09KlDT_rURnLNufk-rDU-sG8FOEnHOZHRr8'
+
+SCOPES = [
+    'https://spreadsheets.google.com/feeds',
+    'https://www.googleapis.com/auth/drive',
+]
+
+COLUMN_HEADERS = [
+    'First Name',
+    'Last Name',
+    'Address',
+    'City',
+    'State',
+    'Zip Code',
+    'County',
+    'Foreclosure File Date',
+    'Sale Date',
+]
+
+
+def _get_client() -> gspread.Client:
+    creds_json = os.environ.get('GOOGLE_CREDENTIALS')
+    if not creds_json:
+        raise EnvironmentError("GOOGLE_CREDENTIALS environment variable is not set.")
+    creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=SCOPES)
+    return gspread.authorize(creds)
+
+
+def _ensure_headers(worksheet: gspread.Worksheet):
+    first_row = worksheet.row_values(1)
+    if first_row != COLUMN_HEADERS:
+        logger.info("Sheet headers missing or outdated — resetting row 1.")
+        worksheet.update('A1', [COLUMN_HEADERS])
+
+
+def _record_key(rec: Dict) -> str:
+    """
+    Dedup key: grantor name + county + file date.
+    If address is present, include it for extra precision.
+    This avoids collapsing all empty-address records in the same county
+    to a single key (|bexar|) which was previously causing data loss.
+    """
+    first     = str(rec.get('first_name', '')).strip().lower()
+    last      = str(rec.get('last_name',  '')).strip().lower()
+    county    = str(rec.get('county',     '')).strip().lower()
+    file_date = str(rec.get('file_date',  '')).strip()
+    address   = str(rec.get('address',    '')).strip().lower()
+
+    if address and address not in ('n/a', ''):
+        return f"{first}|{last}|{county}|{file_date}|{address}"
+    return f"{first}|{last}|{county}|{file_date}"
+
+
+def _existing_keys(worksheet: gspread.Worksheet) -> set:
+    records = worksheet.get_all_records()
+    return {
+        _record_key({
+            'first_name': r.get('First Name', ''),
+            'last_name':  r.get('Last Name',  ''),
+            'county':     r.get('County',     ''),
+            'file_date':  r.get('Foreclosure File Date', ''),
+            'address':    r.get('Address',    ''),
+        })
+        for r in records
+    }
+
+
+def _to_row(rec: Dict) -> List[str]:
+    return [
+        rec.get('first_name', ''),
+        rec.get('last_name',  ''),
+        rec.get('address',    ''),
+        rec.get('city',       ''),
+        rec.get('state',      'TX'),
+        rec.get('zip_code',   ''),
+        rec.get('county',     ''),
+        rec.get('file_date',  ''),
+        rec.get('sale_date',  ''),
+    ]
+
+
+def write_records(records: List[Dict]) -> int:
+    if not records:
+        logger.info("No records to write.")
+        return 0
+
+    client    = _get_client()
+    worksheet = client.open_by_key(SPREADSHEET_ID).sheet1
+
+    _ensure_headers(worksheet)
+    existing  = _existing_keys(worksheet)
+
+    new_rows   = []
+    seen_today = set()
+
+    for rec in records:
+        key = _record_key(rec)
+        if key in existing or key in seen_today:
+            continue
+        seen_today.add(key)
+        new_rows.append(_to_row(rec))
+
+    if new_rows:
+        worksheet.append_rows(new_rows, value_input_option='USER_ENTERED')
+        logger.info(f"Wrote {len(new_rows)} new rows to Google Sheets.")
+    else:
+        logger.info("All records were duplicates — nothing written.")
+
+    return len(new_rows)

@@ -19,17 +19,33 @@ on:
         default: 'false'
 
 jobs:
-  scrape:
-    name: Scrape foreclosure data
+  # ── 1. Build the county matrix from the input (default: all six) ────────────
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - id: set
+        run: |
+          COUNTIES="${{ github.event.inputs.counties }}"
+          if [ -z "$COUNTIES" ]; then COUNTIES="harris bexar dallas tarrant denton johnson"; fi
+          ARR=$(echo "$COUNTIES" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -cs .)
+          echo "matrix=$ARR" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $ARR"
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+  # ── 2. Scrape each county on its own runner (parallel), dump to a JSON artifact
+  scrape:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        county: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -40,42 +56,58 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+      # Always (re)install the browser. A cache that "hits" with a stale/mismatched
+      # Chromium build silently loses whole counties ("Executable doesn't exist"),
+      # so reliability wins over the small caching speedup.
+      - name: Install Playwright Chromium + system deps
+        run: playwright install --with-deps chromium
 
-      - name: Install Playwright + Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: playwright install chromium --with-deps
-
-      - name: Install Chromium system deps (cached run)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: playwright install-deps chromium
-
-      - name: Build CLI arguments
-        id: args
+      - name: Scrape ${{ matrix.county }}
+        env:
+          # Each county has its own runner, so we can spend most of it on name OCR.
+          PUBLICSEARCH_OCR_BUDGET: '2700'
+          PUBLICSEARCH_OCR_MAX: '2000'
+          # Recorded-date window is set per-county in code (Dallas 60d, others 7d);
+          # do NOT force it here or it overrides that for every county.
         run: |
           ARGS=""
           DATE="${{ github.event.inputs.date }}"
-          if [ -n "$DATE" ]; then ARGS="$ARGS --date $DATE"; fi
-          COUNTIES="${{ github.event.inputs.counties }}"
-          if [ -n "$COUNTIES" ]; then ARGS="$ARGS --counties $COUNTIES"; fi
-          DRY="${{ github.event.inputs.dry_run }}"
-          if [ "$DRY" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          echo "cli_args=$ARGS" >> $GITHUB_OUTPUT
+          if [ -n "$DATE" ]; then ARGS="--date $DATE"; fi
+          python main.py --counties ${{ matrix.county }} $ARGS --output records-${{ matrix.county }}.json
 
-      - name: Run scraper
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: python main.py ${{ steps.args.outputs.cli_args }}
-
-      - name: Upload logs on failure
-        if: failure()
+      - name: Upload county records
         uses: actions/upload-artifact@v4
         with:
-          name: scraper-logs-${{ github.run_id }}
-          path: '*.log'
-          if-no-files-found: ignore
+          name: records-${{ matrix.county }}
+          path: records-${{ matrix.county }}.json
+          if-no-files-found: warn
+
+  # ── 3. Collate all county artifacts and write to the Sheet ONCE (no races) ──
+  collate:
+    needs: scrape
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download all county artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Write to Google Sheets
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: |
+          ARGS="--from-json artifacts/**/records-*.json"
+          DRY="${{ github.event.inputs.dry_run }}"
+          if [ "$DRY" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python main.py $ARGS

@@ -9,11 +9,8 @@ Usage:
 """
 
 import argparse
-import glob
-import json
 import logging
 import sys
-from collections import Counter
 from datetime import date, datetime
 from typing import List, Dict
 
@@ -55,34 +52,7 @@ def parse_args():
     p.add_argument('--counties', nargs='+', choices=ALL_COUNTIES,
                    default=ALL_COUNTIES,
                    help='Counties to scrape (default: all)')
-    p.add_argument('--output', type=str, default=None,
-                   help='Write scraped records to this JSON file instead of Sheets '
-                        '(used by the per-county matrix jobs).')
-    p.add_argument('--from-json', nargs='+', default=None,
-                   help='Glob(s) of record JSON files to load and write to Sheets '
-                        '(used by the collate job). Skips scraping.')
     return p.parse_args()
-
-
-def _useful(r: Dict) -> bool:
-    """Keep every upcoming filing that has any identifying field — a name, an
-    address, or at least a Doc ID reference (so nothing is silently dropped)."""
-    return bool(r.get('first_name') or r.get('last_name')
-                or r.get('address') or r.get('doc_id'))
-
-
-def load_records(patterns: List[str]) -> List[Dict]:
-    records: List[Dict] = []
-    for pat in patterns:
-        for path in sorted(glob.glob(pat, recursive=True)):
-            try:
-                with open(path) as f:
-                    data = json.load(f)
-                records.extend(data)
-                logger.info(f"Loaded {len(data)} records from {path}")
-            except Exception as exc:
-                logger.error(f"Failed to read {path}: {exc}")
-    return records
 
 
 def run_scrapers(target_date: date, counties: List[str]) -> List[Dict]:
@@ -100,44 +70,14 @@ def run_scrapers(target_date: date, counties: List[str]) -> List[Dict]:
 
 def main():
     args = parse_args()
-
-    # Collate mode: load records from JSON artifacts and write them to Sheets.
-    if args.from_json:
-        records = [r for r in load_records(args.from_json) if _useful(r)]
-        logger.info(f"Total records loaded: {len(records)}")
-        if not records:
-            logger.warning("No records to write.")
-            return
-        if args.dry_run:
-            logger.info("DRY RUN — not writing to Sheets")
-            for r in records:
-                logger.info(r)
-            return
-        # Stamp the pull date (when the scraper ran) and record the daily counts.
-        pull_date = (datetime.strptime(args.date, '%Y-%m-%d')
-                     if args.date else datetime.now()).strftime('%m/%d/%Y')
-        found_by_county = Counter(r.get('county', '') for r in records)
-        added = sheets_writer.write_records(records, pull_date=pull_date)
-        sheets_writer.update_daily_tracker(pull_date, found_by_county)
-        logger.info(f"Done. {added} new rows added (pull date {pull_date}). "
-                    f"Per-county pulled: {dict(found_by_county)}")
-        return
-
     target_date = (datetime.strptime(args.date, '%Y-%m-%d').date()
                    if args.date else date.today())
 
     logger.info(f"=== TX Foreclosure Scraper | {target_date} ===")
     logger.info(f"Counties: {', '.join(args.counties)}")
 
-    records = [r for r in run_scrapers(target_date, args.counties) if _useful(r)]
+    records = run_scrapers(target_date, args.counties)
     logger.info(f"Total records collected: {len(records)}")
-
-    # Output mode: dump to JSON for the collate job (per-county matrix).
-    if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(records, f)
-        logger.info(f"Wrote {len(records)} records to {args.output}")
-        return
 
     if not records:
         logger.warning("No records found.")
