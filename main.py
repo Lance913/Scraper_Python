@@ -13,6 +13,7 @@ import glob
 import json
 import logging
 import sys
+from collections import Counter
 from datetime import date, datetime
 from typing import List, Dict
 
@@ -112,8 +113,14 @@ def main():
             for r in records:
                 logger.info(r)
             return
-        added = sheets_writer.write_records(records)
-        logger.info(f"Done. {added} new rows added to Google Sheets.")
+        # Stamp the pull date (when the scraper ran) and record the daily counts.
+        pull_date = (datetime.strptime(args.date, '%Y-%m-%d')
+                     if args.date else datetime.now()).strftime('%m/%d/%Y')
+        found_by_county = Counter(r.get('county', '') for r in records)
+        added = sheets_writer.write_records(records, pull_date=pull_date)
+        sheets_writer.update_daily_tracker(pull_date, found_by_county)
+        logger.info(f"Done. {added} new rows added (pull date {pull_date}). "
+                    f"Per-county pulled: {dict(found_by_county)}")
         return
 
     target_date = (datetime.strptime(args.date, '%Y-%m-%d').date()
