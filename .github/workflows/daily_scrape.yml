@@ -67,7 +67,8 @@ jobs:
           # Each county has its own runner, so we can spend most of it on name OCR.
           PUBLICSEARCH_OCR_BUDGET: '2700'
           PUBLICSEARCH_OCR_MAX: '2000'
-          PUBLICSEARCH_WINDOW_DAYS: '60'
+          # Recorded-date window is set per-county in code (Dallas 60d, others 7d);
+          # do NOT force it here or it overrides that for every county.
         run: |
           ARGS=""
           DATE="${{ github.event.inputs.date }}"
