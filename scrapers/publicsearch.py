@@ -35,7 +35,13 @@ from .base import BaseScraper, launch_chromium
 from . import publicsearch_extract as pse
 
 # ── Tunables (env-overridable so the workflow can trade runtime for coverage) ──
-WINDOW_DAYS = int(os.environ.get('PUBLICSEARCH_WINDOW_DAYS', '60'))
+# Recorded-date lookback per county. Most counties file ~daily, so a short window
+# keeps the sheet to recent filings; Dallas files in infrequent batches (once a
+# month or two), so it needs a longer window to avoid missing its data.
+DEFAULT_WINDOW_DAYS = int(os.environ.get('PUBLICSEARCH_WINDOW_DAYS', '7'))
+COUNTY_WINDOW_DAYS = {
+    'dallas': int(os.environ.get('PUBLICSEARCH_WINDOW_DAYS_DALLAS', '60')),
+}
 MAX_PAGES = int(os.environ.get('PUBLICSEARCH_MAX_PAGES', '40'))      # 50 rows/page
 OCR_BUDGET_SEC = int(os.environ.get('PUBLICSEARCH_OCR_BUDGET', '240'))  # per county
 OCR_MAX_DOCS = int(os.environ.get('PUBLICSEARCH_OCR_MAX', '150'))    # per county
@@ -106,6 +112,9 @@ class PublicSearchScraper(BaseScraper):
         self.slug = county_slug
         self.base_url = f"https://{county_slug}.tx.publicsearch.us"
 
+    def _window_days(self) -> int:
+        return COUNTY_WINDOW_DAYS.get(self.slug, DEFAULT_WINDOW_DAYS)
+
     # ── Entry point ───────────────────────────────────────────────────────────
 
     def scrape(self, target_date: date) -> List[Dict]:
@@ -131,7 +140,7 @@ class PublicSearchScraper(BaseScraper):
             self.logger.error(f"{self.county}: playwright not installed")
             return None
 
-        start = (target_date - timedelta(days=WINDOW_DAYS)).strftime('%Y%m%d')
+        start = (target_date - timedelta(days=self._window_days())).strftime('%Y%m%d')
         end = target_date.strftime('%Y%m%d')
         results_url = (f"{self.base_url}/results?department=FC"
                        f"&recordedDateRange={start},{end}&searchType=advancedSearch")
@@ -265,7 +274,7 @@ class PublicSearchScraper(BaseScraper):
             self.logger.error(f"{self.county}: selenium not installed")
             return None
 
-        start = (target_date - timedelta(days=WINDOW_DAYS)).strftime('%Y%m%d')
+        start = (target_date - timedelta(days=self._window_days())).strftime('%Y%m%d')
         end = target_date.strftime('%Y%m%d')
         results_url = (f"{self.base_url}/results?department=FC"
                        f"&recordedDateRange={start},{end}&searchType=advancedSearch")
