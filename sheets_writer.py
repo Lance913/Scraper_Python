@@ -121,7 +121,10 @@ def _sort_by_file_date(worksheet: gspread.Worksheet):
     Dates are written with USER_ENTERED so Sheets stores them as real dates and
     sorts chronologically. Non-fatal if it fails — the data is already written."""
     try:
-        n_rows = len(worksheet.col_values(1))  # includes header
+        # NOTE: must not use col_values(1) — column A (First Name) is blank on many
+        # rows, so its trailing blanks get trimmed and the row count comes back
+        # short, leaving the bottom of the sheet unsorted.
+        n_rows = len(worksheet.get_all_values())  # any row with content, incl. header
         if n_rows > 2:
             worksheet.sort((FILE_DATE_COL, 'asc'),
                            range=f'A2:{LAST_COL_LETTER}{n_rows}')
@@ -163,6 +166,29 @@ def write_records(records: List[Dict], pull_date: str = '') -> List[Dict]:
         logger.info("All records were duplicates — nothing written.")
 
     return new_records
+
+
+def reset_all() -> None:
+    """Wipe the leads sheet and the tracker tab, leaving only fresh headers.
+
+    Use when the sheet is in a mixed state (e.g. rows written before the
+    'Date Pulled' column existed, or a tracker polluted by an older metric).
+    The next full run then repopulates everything cleanly and consistently."""
+    client = _get_client()
+    ss = client.open_by_key(SPREADSHEET_ID)
+
+    leads = ss.sheet1
+    leads.clear()
+    leads.update('A1', [COLUMN_HEADERS], value_input_option='USER_ENTERED')
+    logger.info("Reset leads sheet (cleared + headers rewritten).")
+
+    try:
+        tracker = ss.worksheet(TRACKER_TAB)
+        tracker.clear()
+        tracker.update('A1', [TRACKER_HEADERS], value_input_option='USER_ENTERED')
+        logger.info(f"Reset '{TRACKER_TAB}' tab.")
+    except gspread.WorksheetNotFound:
+        logger.info(f"'{TRACKER_TAB}' tab does not exist yet — nothing to reset.")
 
 
 def update_daily_tracker(pull_date: str, new_by_county: Dict[str, int]):

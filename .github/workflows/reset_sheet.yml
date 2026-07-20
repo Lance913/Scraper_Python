@@ -1,0 +1,39 @@
+name: Reset Google Sheet
+
+# Wipes the leads sheet + Daily Counts tab (headers are rewritten), so the next
+# scraper run repopulates everything cleanly — every row stamped with Date Pulled,
+# sorted by file date, and a fresh tracker. Requires typing RESET to confirm.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type RESET to confirm wiping the sheet'
+        required: true
+        default: ''
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "RESET" ]; then
+            echo "Confirmation text was not 'RESET' — aborting, sheet untouched."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Reset sheet
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: python main.py --reset-sheet
