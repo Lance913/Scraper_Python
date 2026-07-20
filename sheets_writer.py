@@ -130,10 +130,12 @@ def _sort_by_file_date(worksheet: gspread.Worksheet):
         logger.warning(f"Sort by file date failed (data still written): {e}")
 
 
-def write_records(records: List[Dict], pull_date: str = '') -> int:
+def write_records(records: List[Dict], pull_date: str = '') -> List[Dict]:
+    """Write new (non-duplicate) records. Returns the records actually written,
+    so callers can report a true per-county 'new today' count."""
     if not records:
         logger.info("No records to write.")
-        return 0
+        return []
 
     client    = _get_client()
     worksheet = client.open_by_key(SPREADSHEET_ID).sheet1
@@ -141,8 +143,9 @@ def write_records(records: List[Dict], pull_date: str = '') -> int:
     _ensure_headers(worksheet)
     existing   = _existing_keys(worksheet)
 
-    new_rows   = []
-    seen_today = set()
+    new_rows     = []
+    new_records  = []
+    seen_today   = set()
 
     for rec in records:
         key = _record_key(rec)
@@ -150,6 +153,7 @@ def write_records(records: List[Dict], pull_date: str = '') -> int:
             continue
         seen_today.add(key)
         new_rows.append(_to_row(rec, pull_date))
+        new_records.append(rec)
 
     if new_rows:
         worksheet.append_rows(new_rows, value_input_option='USER_ENTERED')
@@ -158,12 +162,15 @@ def write_records(records: List[Dict], pull_date: str = '') -> int:
     else:
         logger.info("All records were duplicates — nothing written.")
 
-    return len(new_rows)
+    return new_records
 
 
-def update_daily_tracker(pull_date: str, found_by_county: Dict[str, int]):
-    """Upsert one row per day on the 'Daily Counts' tab: how many records were
-    pulled per county that day. Re-running a day overwrites its row."""
+def update_daily_tracker(pull_date: str, new_by_county: Dict[str, int]):
+    """One row per day on the 'Daily Counts' tab: how many NEW records were added
+    per county that day (duplicates excluded — this is genuinely new leads).
+
+    If the day already has a row (e.g. the job ran twice), the counts are ADDED to
+    it so the row stays the true total of what came in that day."""
     client = _get_client()
     ss = client.open_by_key(SPREADSHEET_ID)
     try:
@@ -173,14 +180,21 @@ def update_daily_tracker(pull_date: str, found_by_county: Dict[str, int]):
         ws.append_row(TRACKER_HEADERS, value_input_option='USER_ENTERED')
         logger.info(f"Created '{TRACKER_TAB}' tab.")
 
-    counts = [int(found_by_county.get(c, 0)) for c in TRACKER_COUNTIES]
-    row = [pull_date] + counts + [sum(counts)]
+    counts = [int(new_by_county.get(c, 0)) for c in TRACKER_COUNTIES]
 
     dates = ws.col_values(1)  # includes header
     if pull_date in dates:
         idx = dates.index(pull_date) + 1
+        prev = ws.row_values(idx)
+        merged = []
+        for i, _c in enumerate(TRACKER_COUNTIES):
+            cell = prev[i + 1] if len(prev) > i + 1 else ''
+            before = int(cell) if str(cell).strip().lstrip('-').isdigit() else 0
+            merged.append(before + counts[i])
+        row = [pull_date] + merged + [sum(merged)]
         ws.update(f'A{idx}', [row], value_input_option='USER_ENTERED')
-        logger.info(f"Updated tracker row for {pull_date}: {dict(zip(TRACKER_COUNTIES, counts))}")
+        logger.info(f"Tracker {pull_date} (accumulated): {dict(zip(TRACKER_COUNTIES, merged))}")
     else:
+        row = [pull_date] + counts + [sum(counts)]
         ws.append_row(row, value_input_option='USER_ENTERED')
-        logger.info(f"Appended tracker row for {pull_date}: {dict(zip(TRACKER_COUNTIES, counts))}")
+        logger.info(f"Tracker {pull_date} (new): {dict(zip(TRACKER_COUNTIES, counts))}")
