@@ -331,14 +331,46 @@ class PublicSearchScraper(BaseScraper):
             except Exception:
                 pass
 
+    def _wait_for_results(self, page, timeout_ms: int = 25000) -> bool:
+        """Wait until the results table actually has data rows.
+
+        A fixed sleep after navigation is not enough — if the portal is slow we
+        parse an empty table and silently drop the ENTIRE county (this is what
+        zeroed out Tarrant). Poll until rows appear, or until the page explicitly
+        says there are no results."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            try:
+                n = page.evaluate(
+                    "() => { const t=document.querySelector('table');"
+                    " return t ? t.querySelectorAll('tr').length : 0; }")
+            except Exception:
+                n = 0
+            if n > 1:                      # header + at least one data row
+                return True
+            try:
+                empty = page.evaluate(
+                    "() => /no results|no records|0 results|did not match/i"
+                    ".test(document.body.innerText||'')")
+            except Exception:
+                empty = False
+            if empty:
+                self.logger.info(f"{self.county}: portal reports no results for this window.")
+                return False
+            page.wait_for_timeout(500)
+        self.logger.warning(f"{self.county}: results table never populated within "
+                            f"{timeout_ms/1000:.0f}s — treating as empty (may be a slow portal).")
+        return False
+
     def _collect_candidates(self, page, target_date: date) -> List[Dict]:
         candidates: List[Dict] = []
         seen_docs = set()
         for page_num in range(1, MAX_PAGES + 1):
             rows = page.evaluate(_PARSE_ROWS_JS)
-            if not rows and page_num > 1:
-                # Table may still be rendering — wait and re-parse once before trusting 0.
-                page.wait_for_timeout(2500)
+            if not rows:
+                # Table may still be rendering — wait for it before trusting 0.
+                # Applies to page 1 too: a slow first load used to drop a whole county.
+                self._wait_for_results(page)
                 rows = page.evaluate(_PARSE_ROWS_JS)
             kept = 0
             for r in rows:
