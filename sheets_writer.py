@@ -16,6 +16,8 @@ Column order: First Name, Last Name, Address, City, State, Zip, County,
 import os
 import json
 import logging
+import random
+import time
 from typing import List, Dict
 
 import gspread
@@ -53,20 +55,53 @@ TRACKER_TAB = 'Daily Counts'
 TRACKER_COUNTIES = ['Harris', 'Bexar', 'Dallas', 'Tarrant', 'Denton', 'Johnson']
 TRACKER_HEADERS = ['Date'] + TRACKER_COUNTIES + ['Total']
 
+# ── Retry helper ──────────────────────────────────────────────────────────
+# A single transient Google API hiccup (e.g. HTTP 503 "service unavailable")
+# used to kill the entire day's write even after every county scraped
+# successfully. Every gspread call below goes through this so a momentary
+# outage gets retried instead of losing a full day of data.
+_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+
+
+def _is_transient(exc: Exception) -> bool:
+    if isinstance(exc, gspread.exceptions.APIError):
+        try:
+            status = exc.response.status_code
+        except Exception:
+            status = None
+        return status in _TRANSIENT_STATUS
+    return isinstance(exc, (ConnectionError, TimeoutError))
+
+
+def _retry(fn, *, retries: int = 5, base_delay: float = 2.0):
+    """Call the zero-arg callable fn(), retrying transient Google API / network
+    errors with exponential backoff. Re-raises immediately on non-transient
+    errors, and after the final attempt."""
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == retries - 1 or not _is_transient(exc):
+                raise
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(f"Transient Sheets API error ({exc}); retrying in "
+                           f"{delay:.1f}s (attempt {attempt + 1}/{retries})...")
+            time.sleep(delay)
+
 
 def _get_client() -> gspread.Client:
     creds_json = os.environ.get('GOOGLE_CREDENTIALS')
     if not creds_json:
         raise EnvironmentError("GOOGLE_CREDENTIALS environment variable is not set.")
     creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=SCOPES)
-    return gspread.authorize(creds)
+    return _retry(lambda: gspread.authorize(creds))
 
 
 def _ensure_headers(worksheet: gspread.Worksheet):
-    first_row = worksheet.row_values(1)
+    first_row = _retry(lambda: worksheet.row_values(1))
     if first_row != COLUMN_HEADERS:
         logger.info("Sheet headers missing or outdated — resetting row 1.")
-        worksheet.update('A1', [COLUMN_HEADERS])
+        _retry(lambda: worksheet.update('A1', [COLUMN_HEADERS]))
 
 
 def _record_key(rec: Dict) -> str:
@@ -85,7 +120,7 @@ def _record_key(rec: Dict) -> str:
 
 
 def _existing_keys(worksheet: gspread.Worksheet) -> set:
-    records = worksheet.get_all_records()
+    records = _retry(lambda: worksheet.get_all_records())
     return {
         _record_key({
             'doc_id':     r.get('Doc ID',                ''),
@@ -124,10 +159,10 @@ def _sort_by_file_date(worksheet: gspread.Worksheet):
         # NOTE: must not use col_values(1) — column A (First Name) is blank on many
         # rows, so its trailing blanks get trimmed and the row count comes back
         # short, leaving the bottom of the sheet unsorted.
-        n_rows = len(worksheet.get_all_values())  # any row with content, incl. header
+        n_rows = len(_retry(lambda: worksheet.get_all_values()))  # incl. header
         if n_rows > 2:
-            worksheet.sort((FILE_DATE_COL, 'asc'),
-                           range=f'A2:{LAST_COL_LETTER}{n_rows}')
+            _retry(lambda: worksheet.sort((FILE_DATE_COL, 'asc'),
+                                          range=f'A2:{LAST_COL_LETTER}{n_rows}'))
             logger.info(f"Sorted sheet by file date (rows 2–{n_rows}).")
     except Exception as e:
         logger.warning(f"Sort by file date failed (data still written): {e}")
@@ -141,7 +176,7 @@ def write_records(records: List[Dict], pull_date: str = '') -> List[Dict]:
         return []
 
     client    = _get_client()
-    worksheet = client.open_by_key(SPREADSHEET_ID).sheet1
+    worksheet = _retry(lambda: client.open_by_key(SPREADSHEET_ID).sheet1)
 
     _ensure_headers(worksheet)
     existing   = _existing_keys(worksheet)
@@ -159,7 +194,7 @@ def write_records(records: List[Dict], pull_date: str = '') -> List[Dict]:
         new_records.append(rec)
 
     if new_rows:
-        worksheet.append_rows(new_rows, value_input_option='USER_ENTERED')
+        _retry(lambda: worksheet.append_rows(new_rows, value_input_option='USER_ENTERED'))
         logger.info(f"Wrote {len(new_rows)} new rows to Google Sheets.")
         _sort_by_file_date(worksheet)
     else:
@@ -175,17 +210,17 @@ def reset_all() -> None:
     'Date Pulled' column existed, or a tracker polluted by an older metric).
     The next full run then repopulates everything cleanly and consistently."""
     client = _get_client()
-    ss = client.open_by_key(SPREADSHEET_ID)
+    ss = _retry(lambda: client.open_by_key(SPREADSHEET_ID))
 
     leads = ss.sheet1
-    leads.clear()
-    leads.update('A1', [COLUMN_HEADERS], value_input_option='USER_ENTERED')
+    _retry(lambda: leads.clear())
+    _retry(lambda: leads.update('A1', [COLUMN_HEADERS], value_input_option='USER_ENTERED'))
     logger.info("Reset leads sheet (cleared + headers rewritten).")
 
     try:
-        tracker = ss.worksheet(TRACKER_TAB)
-        tracker.clear()
-        tracker.update('A1', [TRACKER_HEADERS], value_input_option='USER_ENTERED')
+        tracker = _retry(lambda: ss.worksheet(TRACKER_TAB))
+        _retry(lambda: tracker.clear())
+        _retry(lambda: tracker.update('A1', [TRACKER_HEADERS], value_input_option='USER_ENTERED'))
         logger.info(f"Reset '{TRACKER_TAB}' tab.")
     except gspread.WorksheetNotFound:
         logger.info(f"'{TRACKER_TAB}' tab does not exist yet — nothing to reset.")
@@ -198,29 +233,29 @@ def update_daily_tracker(pull_date: str, new_by_county: Dict[str, int]):
     If the day already has a row (e.g. the job ran twice), the counts are ADDED to
     it so the row stays the true total of what came in that day."""
     client = _get_client()
-    ss = client.open_by_key(SPREADSHEET_ID)
+    ss = _retry(lambda: client.open_by_key(SPREADSHEET_ID))
     try:
-        ws = ss.worksheet(TRACKER_TAB)
+        ws = _retry(lambda: ss.worksheet(TRACKER_TAB))
     except gspread.WorksheetNotFound:
-        ws = ss.add_worksheet(title=TRACKER_TAB, rows=1000, cols=len(TRACKER_HEADERS))
-        ws.append_row(TRACKER_HEADERS, value_input_option='USER_ENTERED')
+        ws = _retry(lambda: ss.add_worksheet(title=TRACKER_TAB, rows=1000, cols=len(TRACKER_HEADERS)))
+        _retry(lambda: ws.append_row(TRACKER_HEADERS, value_input_option='USER_ENTERED'))
         logger.info(f"Created '{TRACKER_TAB}' tab.")
 
     counts = [int(new_by_county.get(c, 0)) for c in TRACKER_COUNTIES]
 
-    dates = ws.col_values(1)  # includes header
+    dates = _retry(lambda: ws.col_values(1))  # includes header
     if pull_date in dates:
         idx = dates.index(pull_date) + 1
-        prev = ws.row_values(idx)
+        prev = _retry(lambda: ws.row_values(idx))
         merged = []
         for i, _c in enumerate(TRACKER_COUNTIES):
             cell = prev[i + 1] if len(prev) > i + 1 else ''
             before = int(cell) if str(cell).strip().lstrip('-').isdigit() else 0
             merged.append(before + counts[i])
         row = [pull_date] + merged + [sum(merged)]
-        ws.update(f'A{idx}', [row], value_input_option='USER_ENTERED')
+        _retry(lambda: ws.update(f'A{idx}', [row], value_input_option='USER_ENTERED'))
         logger.info(f"Tracker {pull_date} (accumulated): {dict(zip(TRACKER_COUNTIES, merged))}")
     else:
         row = [pull_date] + counts + [sum(counts)]
-        ws.append_row(row, value_input_option='USER_ENTERED')
+        _retry(lambda: ws.append_row(row, value_input_option='USER_ENTERED'))
         logger.info(f"Tracker {pull_date} (new): {dict(zip(TRACKER_COUNTIES, counts))}")
