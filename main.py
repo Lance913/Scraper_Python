@@ -26,6 +26,8 @@ from scrapers import (
     JohnsonCountyScraper,
 )
 import sheets_writer
+import zip_lookup
+from filters import is_multifamily
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,8 +71,15 @@ def parse_args():
 
 def _useful(r: Dict) -> bool:
     """Keep only records that have a property address — an address is required
-    for skip-tracing, so a name-only or doc-id-only record isn't actionable."""
-    return bool(r.get('address'))
+    for skip-tracing, so a name-only or doc-id-only record isn't actionable —
+    and that are single-family (not a unit-numbered multi-family property)."""
+    if not r.get('address'):
+        return False
+    if is_multifamily(r.get('address'), r.get('city')):
+        logger.info(f"Dropping multi-family/unit record: address={r.get('address')!r} "
+                    f"city={r.get('city')!r} county={r.get('county')} doc_id={r.get('doc_id')}")
+        return False
+    return True
 
 
 def load_records(patterns: List[str]) -> List[Dict]:
@@ -114,6 +123,7 @@ def main():
     if args.from_json:
         records = [r for r in load_records(args.from_json) if _useful(r)]
         logger.info(f"Total records loaded: {len(records)}")
+        zip_lookup.backfill_zip(records)
         if not records:
             logger.warning("No records to write.")
             return
@@ -144,7 +154,9 @@ def main():
     records = [r for r in run_scrapers(target_date, args.counties) if _useful(r)]
     logger.info(f"Total records collected: {len(records)}")
 
-    # Output mode: dump to JSON for the collate job (per-county matrix).
+    # Output mode: dump to JSON for the collate job (per-county matrix). Zip
+    # backfill happens once at the collate/write stage below, not here, so
+    # the per-county matrix jobs don't each hit the Census API separately.
     if args.output:
         with open(args.output, 'w') as f:
             json.dump(records, f)
@@ -154,6 +166,8 @@ def main():
     if not records:
         logger.warning("No records found.")
         return
+
+    zip_lookup.backfill_zip(records)
 
     if args.dry_run:
         logger.info("DRY RUN — not writing to Sheets")
