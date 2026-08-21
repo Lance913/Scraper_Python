@@ -36,12 +36,16 @@ from . import publicsearch_extract as pse
 from filters import is_multifamily
 
 # ── Tunables (env-overridable so the workflow can trade runtime for coverage) ──
-# Recorded-date lookback per county. Most counties file ~daily, so a short window
-# keeps the sheet to recent filings; Dallas files in infrequent batches (once a
-# month or two), so it needs a longer window to avoid missing its data.
+# Recorded-date lookback per county, applied fresh every day the job runs. As
+# long as the daily job runs every day without a gap longer than this window,
+# any filing recorded in the last N days is caught on some day within that
+# window — a gap longer than the window is the only way to permanently miss
+# data. All counties use the same 7-day window (Dallas previously used 60 to
+# be extra safe against its infrequent filing batches, but 7 is sufficient in
+# steady daily operation).
 DEFAULT_WINDOW_DAYS = int(os.environ.get('PUBLICSEARCH_WINDOW_DAYS', '7'))
 COUNTY_WINDOW_DAYS = {
-    'dallas': int(os.environ.get('PUBLICSEARCH_WINDOW_DAYS_DALLAS', '60')),
+    'dallas': int(os.environ.get('PUBLICSEARCH_WINDOW_DAYS_DALLAS', str(DEFAULT_WINDOW_DAYS))),
 }
 MAX_PAGES = int(os.environ.get('PUBLICSEARCH_MAX_PAGES', '40'))      # 50 rows/page
 OCR_BUDGET_SEC = int(os.environ.get('PUBLICSEARCH_OCR_BUDGET', '240'))  # per county
