@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .base import BaseScraper, launch_chromium
 from . import publicsearch_extract as pse
+from filters import is_multifamily
 
 # ── Tunables (env-overridable so the workflow can trade runtime for coverage) ──
 # Recorded-date lookback per county. Most counties file ~daily, so a short window
@@ -217,6 +218,8 @@ class PublicSearchScraper(BaseScraper):
             return None
         seen_docs.add(key)
         street, city, zip_c = self._table_address(r.get('property_address', ''))
+        if street and is_multifamily(street, city):
+            return None  # unit-numbered property — single-family only
         return {
             'doc_id_internal': r.get('doc_id', ''),
             'doc_number': r.get('doc_number') or r.get('doc_id', ''),
@@ -414,6 +417,9 @@ class PublicSearchScraper(BaseScraper):
                         first, last = o_first, o_last
                 if not address and o_street and not pse.is_nonproperty_address(o_street):
                     address, city, zip_c = o_street, o_city, o_zip
+            if address and is_multifamily(address, city):
+                self.logger.info(f"{self.county}: drop unit-numbered record {address!r}")
+                continue
             if first or last:
                 named += 1
             if address:

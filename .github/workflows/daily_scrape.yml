@@ -51,7 +51,16 @@ jobs:
           cache: 'pip'
 
       - name: Install system OCR deps (tesseract + poppler)
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils
+        # Drop unrelated apt sources preinstalled on the runner image (e.g. the
+        # Microsoft azure-cli repo) — one of them hanging can stall `apt-get
+        # update` for the entire job timeout and silently kill the whole county
+        # (this happened to Harris: stuck 54+ min on packages.microsoft.com).
+        # `timeout` is a second line of defense in case a different source hangs.
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* /etc/apt/sources.list.d/*azure* 2>/dev/null || true
+          timeout 90 sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
+            || echo "apt-get update timed out/failed — continuing with existing package index"
+          sudo apt-get install -y tesseract-ocr poppler-utils
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
