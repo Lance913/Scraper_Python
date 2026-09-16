@@ -1,0 +1,33 @@
+name: Diag - Harris OCR NONE-tier samples (read-only, no writes)
+
+on:
+  push:
+    branches:
+      - diag/harris-ocr-samples
+
+jobs:
+  dump-samples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system OCR deps (tesseract + poppler)
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* /etc/apt/sources.list.d/*azure* 2>/dev/null || true
+          timeout 90 sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
+            || echo "apt-get update timed out/failed — continuing with existing package index"
+          sudo apt-get install -y tesseract-ocr poppler-utils
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: playwright install --with-deps chromium
+
+      - name: Dump NONE-tier OCR samples
+        run: python _diag_harris_ocr_samples.py
