@@ -45,6 +45,35 @@ RE_CSZ = re.compile(r'^([A-Z][A-Za-z .]+?),?\s+(?:TX|TEXAS)\s+(\d{5})(?:-\d{4})?
 # street line (number + words), trailing barcode digits stripped
 RE_STREET = re.compile(r'^\s*(\d{2,6}\s+[A-Z0-9][A-Za-z0-9 .#-]{3,45}?)(?:\s+\d{6,})?\s*-?\s*$')
 
+# --- Fallback: a "STREET, CITY, TX ZIP" blob anywhere in the text, labeled
+# ("commonly known as"), slash-prefixed (case# // address, e.g. barcode/
+# reference lines), or bare. Broader than RE_PROP_LABEL/RE_STREET above (not
+# limited to a clean label or the first ~8 lines), so it only runs as a last
+# resort and is gated hard by the Harris-area zip + a proximity check for
+# trustee/servicer/suite language, to avoid ever picking up a law firm's
+# mailing address instead of the property (same trap RE_PROP_LABEL/RE_STREET
+# already avoid via SERVICER_CITIES/_is_venue).
+_ADDR_BLOB = (r'(\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .\'#-]{2,45}?)'
+              r'\s*,\s*([A-Za-z][A-Za-z .\'-]+?)\s*,?\s*(?:TX|TEXAS)\s*,?\s*(\d{5})')
+RE_ADDR_LABELED = re.compile(r'(?:commonly\s+known\s+as)\s*[:\-]?\s*' + _ADDR_BLOB, re.I)
+RE_ADDR_SLASH = re.compile(r'/\s*' + _ADDR_BLOB)
+RE_ADDR_GENERIC = re.compile(_ADDR_BLOB)
+
+# Deliberately NOT "trustee": every Harris doc is titled "Notice of
+# Substitute Trustee's Sale" and mentions "Substitute Trustee" repeatedly as
+# normal boilerplate unrelated to any specific address, so it wouldn't
+# discriminate at all here (unlike the other keywords below, which only show
+# up when describing a specific mailing address).
+_ADDR_BAD_CTX = re.compile(
+    r'(servic|mortgagee|beneficiary|attorney|c/o|\bsuite\b|\bste\.?\b|'
+    r'p\.?\s?o\.?\s*box|\blaw\b|title\s+services?)', re.I)
+
+
+def _addr_bad_ctx(text, start, end):
+    # Check a window spanning before AND through the match — "Suite 1230"
+    # is often captured as part of the street text itself, not just nearby.
+    return bool(_ADDR_BAD_CTX.search(text[max(0, start - 120):end + 60]))
+
 # --- Owner patterns (label-anchored, highest confidence first) ---
 RE_OWNER = [
     re.compile(r'Grantor\(s\)\s*/?\s*Mortgagor\(s\)\s*\n?\s*(?:\d{1,2}/\d{1,2}/\d{4}\s+)?([A-Z][A-Z. ]{4,50}?)(?:\s+HUSBAND|\s+WIFE|\s+A\s+SINGLE|\s*\n|\s*$)', re.I),
@@ -145,9 +174,29 @@ def parse_address(text):
                 if city.upper() not in SERVICER_CITIES:
                     return street2, city, 'TX', cm.group(2)
 
-    # Path 3 removed: it grabbed the first city/zip on the page, which is almost
-    # always the trustee law firm (Addison/Plano/Dallas), not the property.
-    # We only trust the header block + explicit "Property Address:" label above.
+    # 3) Broader fallback: a labeled ("commonly known as"), slash-prefixed, or
+    # bare "STREET, CITY, TX ZIP" blob anywhere in the text. Unlike the removed
+    # first-city-on-the-page approach this NEVER got tried before (that one
+    # took whatever it found first, which was almost always the trustee law
+    # firm's address) — this instead tries every candidate in order and keeps
+    # the same Harris-zip + SERVICER_CITIES + venue guards, plus a proximity
+    # check for trustee/servicer/suite language, so a law-firm address still
+    # gets rejected even when it happens to sit in Houston with a 770-777 zip
+    # (e.g. a title company's own Houston office).
+    for rx in (RE_ADDR_LABELED, RE_ADDR_SLASH, RE_ADDR_GENERIC):
+        for m in rx.finditer(text):
+            street, city_raw, zipc = m.group(1), m.group(2), m.group(3)
+            if not _is_harris_zip(zipc):
+                continue
+            if _is_venue(street) or _addr_bad_ctx(text, m.start(), m.end()):
+                continue
+            street = re.sub(r'\s*-\s*$', '', street.strip()).strip(' ,.')
+            street2, scity = _split_city_from_street(street)
+            city = scity or city_raw.strip().title()
+            if city.upper() in SERVICER_CITIES:
+                continue
+            return street2, city, 'TX', zipc
+
     return '', '', 'TX', ''
 
 
@@ -185,12 +234,60 @@ def extract_from_pdf_bytes(pdf_bytes):
 
 
 if __name__ == '__main__':
-    import sys; sys.path.insert(0,'.')
-    from test_samples import (SAMPLE_2405, SAMPLE_9391, SAMPLE_2406_P1,
-                              SAMPLE_2395_P1, SAMPLE_2462_P1)
-    cases = [('2405',SAMPLE_2405),('9391',SAMPLE_9391),('2406',SAMPLE_2406_P1),
-             ('2395',SAMPLE_2395_P1),('2462',SAMPLE_2462_P1)]
-    for nm,txt in cases:
-        r = extract_from_text(txt)
-        tier = 'FULL' if (r['first_name'] and r['address']) else ('PARTIAL' if (r['first_name'] or r['address']) else 'NONE')
-        print(f"{nm:6} [{tier:7}] name={r['first_name']+' '+r['last_name']!r:28} addr={r['address']!r}, {r['city']!r}, {r['state']} {r['zip_code']}")
+    # Real excerpts pulled via a live OCR run against actual Harris NONE-tier
+    # docs (2026-09-16) — see the "Diag - Harris OCR" workflow run this was
+    # captured from. Positive cases confirm the new fallback (RE_ADDR_LABELED/
+    # SLASH/GENERIC) recovers addresses RE_PROP_LABEL/RE_STREET miss; negative
+    # cases confirm it still never picks up a trustee/servicer address.
+    ADDR_CASES = {
+        # FRCL-2026-2935: address only appears in a barcode/reference line
+        # near the bottom of the page — RE_STREET/RE_PROP_LABEL never see it.
+        'slash_edgemoor': (
+            "I am whose address is c/o AVT Title Services, LLC, 5177 Richmond Avenue Suite 1230,\n"
+            "Houston, TX 77056 I declare under penalty of perjury that I filed this Notice of "
+            "Foreclosure Sale at the office\n"
+            "of the Harris County Clerk and caused it to be posted at the place designated by "
+            "the Harris County Commissioners Court\n\n"
+            "26-000041-210-1 // 6922 EDGEMOOR DRIVE, HOUSTON, TX 77074",
+            # Street stays raw OCR case here, matching RE_PROP_LABEL/RE_STREET
+            # above (neither of which .title()s the street either) — only
+            # publicsearch_extract.py's counties do that, not Harris.
+            ('6922 EDGEMOOR DRIVE', 'Houston', 'TX', '77074'),
+        ),
+        # FRCL-2026-4878: bare "street, city, TX zip" near the top of the
+        # page, no label and not isolated on its own line the way RE_STREET
+        # + RE_CSZ require (it's followed by " ; case-number" on the same line).
+        'bare_bennett': (
+            "FILED 7/9/2026 10:44:06 AM\n"
+            "715 Bennett Dr, Pasadena, TX 77503 ; 26-010010\n"
+            "NOTICE OF SUBSTITUTE TRUSTEE'S SALE",
+            ('715 Bennett Dr', 'Pasadena', 'TX', '77503'),
+        ),
+        # Trap: AVT Title Services' own Houston office has a valid 770xx zip,
+        # so the zip-prefix gate alone would accept it — must be rejected via
+        # the "c/o"/"suite" proximity check (_addr_bad_ctx), same as the
+        # slash_edgemoor case above but with NO real property address present.
+        'trap_avt_servicer': (
+            "Tam whose address 1s c/o AVT Title Services, LLC, 5177 Richmond Avenue Suite 1230,\n"
+            "Houston, TX 77056 I declare under penalty of perjury",
+            ('', '', 'TX', ''),
+        ),
+        # Trap: the standard Harris auction venue (Bayou City Event Center) —
+        # must stay rejected by _is_venue even via the new broader fallback.
+        'trap_venue': (
+            "Place of Sale of Property: THE BAYOU CITY EVENT CENTER, MAGNOLIA SOUTH BALLROOM, "
+            "LOCATED AT 9401 KNIGHT RD, HOUSTON, TX 77045 OR AS DESIGNATED BY THE COMMISSIONER'S OFFICE.",
+            ('', '', 'TX', ''),
+        ),
+        # Legal-description-only doc (Lot/Block, no street address anywhere) —
+        # must stay empty; there's genuinely nothing to extract.
+        'no_address_legal_only': (
+            "Legal Description: LOT 3, BLOCK 1, HOLEMAN ESTATES, AN ADDITION IN HARRIS COUNTY, TEXAS, "
+            "ACCORDING TO THE MAP OR PLAT RECORDED IN FILM CODE NO. 704441, MAP RECORDS OF HARRIS COUNTY, TEXAS.",
+            ('', '', 'TX', ''),
+        ),
+    }
+    print("--- address (new fallback patterns) ---")
+    for nm, (txt, exp) in ADDR_CASES.items():
+        got = parse_address(txt)
+        print(f"{nm:20} {'OK ' if got == exp else 'FAIL'} got={got} exp={exp}")
