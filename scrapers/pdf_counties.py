@@ -59,6 +59,44 @@ RE_OWNER_EXTRA = [
 RE_FILED = re.compile(r'\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?\s+(\d{1,2})\s*,?\s*(20\d\d)', re.I)
 
 
+SUFFIX = set('''ST STREET DR DRIVE LN LANE WAY CT COURT TRL TRAIL CIR CIRCLE RD ROAD BLVD PKWY PARKWAY LOOP LP PL
+PLACE COVE CV BEND BND PASS RUN PATH TRCE TRACE TER TERRACE HWY HIGHWAY AVE AVENUE ROW XING CRK CREEK PT POINT GDN GLEN
+HOLW HOLLOW RDG RIDGE SQ PLZ PLAZA WALK VW VIEW MDWS MEADOW MEADOWS SPRINGS ESTATES'''.split())
+
+
+def clean_street(s: str) -> str:
+    """'0013\\n\\n14122 MILLGLEN CT' -> '14122 MILLGLEN CT'; drop barcode / OCR junk after the street type."""
+    s = re.split(r'[\r\n]+', s.strip())[-1].strip(' ,.-')
+    s = re.sub(r'^\d{1,5}\s+(?=\d{2,6}\s+[A-Za-z])', '', s)          # stray number before the house number
+    w = s.split()
+    last_sfx = max((i for i, t in enumerate(w) if t.upper().strip('.,') in SUFFIX and i > 0), default=None)
+    if last_sfx is not None:
+        keep = w[:last_sfx + 1]
+        rest = w[last_sfx + 1:]
+        # keep a direction or unit right after the suffix ("... Hwy 36 South", "... Dr #12")
+        if keep[-1].upper().strip('.') in ('HWY', 'HIGHWAY') and rest and rest[0].isdigit():
+            keep.append(rest.pop(0))
+        while rest and (rest[0].upper() in ('N', 'S', 'E', 'W', 'NORTH', 'SOUTH', 'EAST', 'WEST') or rest[0].startswith('#')):
+            keep.append(rest.pop(0))
+        w = keep
+    else:
+        while len(w) > 2 and (re.search(r'\d{5,}', w[-1]) or not re.search(r'[AEIOUY]', w[-1].upper())):
+            w.pop()
+    return ' '.join(w)
+
+
+def split_owner(full: str):
+    """'Terri Lynn Schroeder And George ...' -> ('Terri', 'Schroeder'): first borrower, first + last word."""
+    full = re.split(r'\s+(?:and|&)\s+', full or '', flags=re.I)[0].strip(' ,.')
+    w = [x for x in full.split() if x]
+    if not w: return '', ''
+    sfx = ''
+    if len(w) > 2 and w[-1].upper().strip('.') in ('JR', 'SR', 'II', 'III', 'IV'):
+        sfx = ' ' + w.pop()
+    if len(w) == 1: return w[0].title(), ''
+    return w[0].title(), w[-1].title() + sfx.title()
+
+
 def _fix_city(street, city, cities):
     """'525 Dennis' + 'Dr Round Rock' -> ('525 Dennis Dr', 'Round Rock') using the county's city list."""
     full = f'{street} {city}'.strip()
@@ -103,7 +141,11 @@ def extract(text: str, zip_ok, cities=()) -> Dict:
             if hx.looks_like_owner(c):
                 owner = c; break
         if owner: break
-    first, last = hx.split_name(owner)
+    first, last = split_owner(owner)
+    if street:
+        street = clean_street(street)
+        if not re.match(r'^\d+\s+[A-Za-z]', street) or len(street.split()) < 2:
+            street = city = zipc = ''
     fm = RE_FILED.search(text[:1500])
     fdate = ''
     if fm:
@@ -252,9 +294,12 @@ class WilliamsonForeclosureScraper(BaseScraper):
 # ---------------- Fort Bend ----------------
 FB = ('https://www.fortbendcountytx.gov/sites/default/files/document-central/document-central/'
       'county-clerk-documents/home-page-county-clerk/research-foreclosures/{mon}-{y}.pdf')
-FB_ZIP = lambda z: z[:3] in ('774', '775', '770')
+FB_ZIPS = set('''77406 77407 77417 77420 77423 77430 77435 77441 77444 77451 77459 77461 77464 77469 77471 77476
+77477 77478 77479 77481 77489 77494 77498 77545 77583 77584 77053 77031 77035 77071 77072 77082 77083 77085 77099'''.split())
+FB_ZIP = lambda z: z in FB_ZIPS
 FB_CITIES = ['RICHMOND', 'ROSENBERG', 'SUGAR LAND', 'MISSOURI CITY', 'STAFFORD', 'KATY', 'FULSHEAR', 'NEEDVILLE',
-             'FRESNO', 'HOUSTON', 'SIMONTON', 'BEASLEY', 'ARCOLA', 'THOMPSONS', 'GUY', 'ORCHARD', 'KENDLETON', 'MEADOWS PLACE']
+             'FRESNO', 'HOUSTON', 'SIMONTON', 'BEASLEY', 'ARCOLA', 'THOMPSONS', 'GUY', 'ORCHARD', 'KENDLETON', 'MEADOWS PLACE',
+             'ROSHARON', 'PEARLAND', 'EAST BERNARD', 'SUGARLAND', 'PATTISON', 'BROOKSHIRE', 'NEEDVILLE']
 
 
 class _CombinedScanScraper(BaseScraper):
@@ -282,7 +327,7 @@ class _CombinedScanScraper(BaseScraper):
                 x = extract(text[:12000], type(self).zip_ok, self.cities)
                 if not x['address'] and not x['last_name']:
                     continue
-                key = x['address'].upper() or f"{x['last_name']}|{first_page}"
+                key = re.sub(r'[^A-Z0-9]', '', x['address'].upper()) or f"{x['last_name']}|{first_page}"
                 if key in seen: continue
                 seen.add(key); n_addr += bool(x['address'])
                 recs.append(self.build_record(doc_id=f'{self.prefix} {label} p{first_page}', sale_date=sd, **x))

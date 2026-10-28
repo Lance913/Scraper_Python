@@ -1,0 +1,21 @@
+name: Remove county rows (redo a county)
+on:
+  workflow_dispatch:
+    inputs:
+      counties:
+        description: 'County names, comma separated (e.g. Fort Bend,Comal)'
+        required: true
+jobs:
+  remove:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11', cache: 'pip'}
+      - run: pip install -r requirements.txt
+      - env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          COUNTIES: ${{ github.event.inputs.counties }}
+        run: |
+          IFS=',' read -ra C <<< "$COUNTIES"
+          python remove_county_rows.py "${C[@]}"
