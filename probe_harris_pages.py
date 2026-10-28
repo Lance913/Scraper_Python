@@ -31,12 +31,14 @@ with sync_playwright() as p:
         out['click3'] = firsts(page)
     except Exception as e: out['click3_err'] = str(e)[:300]
     # doc fetch
-    import sys; sys.path.insert(0, '.')
-    from scrapers.harris_extract import ocr_pdf_bytes, extract_from_text
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('hx', 'scrapers/harris_extract.py'); hx = importlib.util.module_from_spec(spec); spec.loader.exec_module(hx)
+    ocr_pdf_bytes, extract_from_text = hx.ocr_pdf_bytes, hx.extract_from_text
     out['docs'] = []
     for doc_id, href in (out.get('click3') or [])[:3]:
         body = ctx.request.get(APP_BASE + href).body()
-        t = ocr_pdf_bytes(body, max_pages=3)
+        try: t = ocr_pdf_bytes(body, max_pages=3)
+        except Exception as e: t = 'ERR ' + str(e)
         out['docs'].append({'id': doc_id, 'len': len(body), 'text': t[:3000], 'extract': extract_from_text(t)})
     b.close()
 os.makedirs('probe_out', exist_ok=True); json.dump(out, open('probe_out/harris_pages2.json', 'w'), indent=1)
