@@ -1,0 +1,219 @@
+{
+ "2026-11": {
+  "frcl_on_page": 38,
+  "pager": [
+   [
+    "2",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$2')"
+   ],
+   [
+    "3",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$3')"
+   ],
+   [
+    "4",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$4')"
+   ],
+   [
+    "5",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$5')"
+   ],
+   [
+    "6",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$6')"
+   ],
+   [
+    "7",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$7')"
+   ],
+   [
+    "8",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$8')"
+   ],
+   [
+    "9",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$9')"
+   ],
+   [
+    "10",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$10')"
+   ],
+   [
+    "...",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$11')"
+   ],
+   [
+    "2",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$2')"
+   ],
+   [
+    "3",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$3')"
+   ],
+   [
+    "4",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$4')"
+   ],
+   [
+    "5",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$5')"
+   ],
+   [
+    "6",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$6')"
+   ],
+   [
+    "7",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$7')"
+   ],
+   [
+    "8",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$8')"
+   ],
+   [
+    "9",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$9')"
+   ],
+   [
+    "10",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$10')"
+   ],
+   [
+    "...",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$11')"
+   ]
+  ],
+  "counts": [],
+  "selects": [
+   "ctl00$ContentPlaceHolder1$ddlYear=2026 [2027,2026,2025,2024,2023,2022,2021,2020]",
+   "ctl00$ContentPlaceHolder1$ddlMonth=11 [Select -,12,11,10,9,8,7,6]"
+  ],
+  "snippet": "postings accepted through 10/27/2026\nImages available from 12/3/2013 to Present\nDocument ID\nSale Date\tFile Date\n2027\n2026\n2025\n2024\n2023\n2022\n2021\n2020\n2019\n2018\n2017\n2016\n2015\n2014\n2013\nSelect -\nDecember\nNovember\nOctober\nSeptember\nAugust\nJuly\nJune\nMay\nApril\nMarch\nFebruary\nJanuary\n \n\n\n\n\n840 Row(s) Found.\nSelect Document ID to View Image.\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n...\n\n\u00a0\tDoc ID\tSale Date\tFile Date\tPgs\n\tFRCL-2026-5654\t11/03/2026\t08/06/2026\t2\n\tFRCL-2026-5922\t11/03/2026\t08/11/2026\t1\n\tFRCL-2026-5980\t11/03/2026\t08/12/2026\t2\n\tFRCL-2026-5981\t11/03/2026\t08/12/2026\t2\n\tFRCL-2026-6016\t11/03/2026\t08/13/2026\t2\n\t"
+ },
+ "2026-12": {
+  "frcl_on_page": 38,
+  "pager": [
+   [
+    "2",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$2')"
+   ],
+   [
+    "3",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$3')"
+   ],
+   [
+    "4",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$4')"
+   ],
+   [
+    "5",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$5')"
+   ],
+   [
+    "6",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$6')"
+   ],
+   [
+    "7",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$7')"
+   ],
+   [
+    "8",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$8')"
+   ],
+   [
+    "9",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$9')"
+   ],
+   [
+    "10",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$10')"
+   ],
+   [
+    "...",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$11')"
+   ],
+   [
+    "2",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$2')"
+   ],
+   [
+    "3",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$3')"
+   ],
+   [
+    "4",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$4')"
+   ],
+   [
+    "5",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$5')"
+   ],
+   [
+    "6",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$6')"
+   ],
+   [
+    "7",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$7')"
+   ],
+   [
+    "8",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$8')"
+   ],
+   [
+    "9",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$9')"
+   ],
+   [
+    "10",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$10')"
+   ],
+   [
+    "...",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$11')"
+   ]
+  ],
+  "counts": [],
+  "selects": [
+   "ctl00$ContentPlaceHolder1$ddlYear=2026 [2027,2026,2025,2024,2023,2022,2021,2020]",
+   "ctl00$ContentPlaceHolder1$ddlMonth=12 [Select -,12,11,10,9,8,7,6]"
+  ],
+  "snippet": "postings accepted through 10/27/2026\nImages available from 12/3/2013 to Present\nDocument ID\nSale Date\tFile Date\n2027\n2026\n2025\n2024\n2023\n2022\n2021\n2020\n2019\n2018\n2017\n2016\n2015\n2014\n2013\nSelect -\nDecember\nNovember\nOctober\nSeptember\nAugust\nJuly\nJune\nMay\nApril\nMarch\nFebruary\nJanuary\n \n\n\n\n\n471 Row(s) Found.\nSelect Document ID to View Image.\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n...\n\n\u00a0\tDoc ID\tSale Date\tFile Date\tPgs\n\tFRCL-2026-5688\t12/01/2026\t08/06/2026\t1\n\tFRCL-2026-5803\t12/01/2026\t08/10/2026\t3\n\tFRCL-2026-5867\t12/01/2026\t08/10/2026\t4\n\tFRCL-2026-6387\t12/01/2026\t09/03/2026\t3\n\tFRCL-2026-6500\t12/01/2026\t09/08/2026\t2\n\t"
+ },
+ "2027-1": {
+  "frcl_on_page": 38,
+  "pager": [
+   [
+    "2",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$2')"
+   ],
+   [
+    "3",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$3')"
+   ],
+   [
+    "4",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$4')"
+   ],
+   [
+    "2",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$2')"
+   ],
+   [
+    "3",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$3')"
+   ],
+   [
+    "4",
+    "javascript:__doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page$4')"
+   ]
+  ],
+  "counts": [],
+  "selects": [
+   "ctl00$ContentPlaceHolder1$ddlYear=2027 [2027,2026,2025,2024,2023,2022,2021,2020]",
+   "ctl00$ContentPlaceHolder1$ddlMonth=1 [Select -,4,3,2,1]"
+  ],
+  "snippet": "DS\nPERSONAL RECORDS\nCOMMISSIONERS COURT\n\u00a0 \u00a0 \u00a0\n\n\n\n\nForeclosures\nReflect(s) postings accepted through 10/27/2026\nImages available from 12/3/2013 to Present\nDocument ID\nSale Date\tFile Date\n2027\n2026\n2025\n2024\n2023\n2022\n2021\n2020\n2019\n2018\n2017\n2016\n2015\n2014\n2013\nSelect -\nApril\nMarch\nFebruary\nJanuary\n \n\n\n\n\n139 Row(s) Found.\nSelect Document ID to View Image.\n1\n2\n3\n4\n\n\u00a0\tDoc ID\tSale Date\tFile Date\tPgs\n\tFRCL-2026-4751\t01/05/2027\t07/02/2026\t3\n\tFRCL-2026-6402\t01/05/2027\t09/03/2026\t1\n\tFRCL-2026-7181\t01/05/2027\t09/29/2026\t3\n\tFRCL-2026-7408\t01/05/2027\t10/08/2026\t3\n\tFRCL-2026-7409\t01/05/2027\t10/08/2026\t3\n\t"
+ }
+}
