@@ -134,6 +134,7 @@ class HarrisCountyScraper(BaseScraper):
                 total_txt = re.search(r'([\d,]+) Row\(s\) Found', page.content())
                 self.logger.info(f"Harris {month_str} {year_val}: read {pg - 1} page(s), {len(rows)} rows"
                                  + (f" (portal says {total_txt.group(1)})" if total_txt else ''))
+                print(f"::notice::Harris {month_str} {year_val}: read {pg - 1} pages, {len(rows)} rows, portal says {total_txt.group(1) if total_txt else '?'}", flush=True)
 
                 # Filter to UPCOMING auctions only (sale_date >= today).
                 upcoming = []
@@ -153,6 +154,7 @@ class HarrisCountyScraper(BaseScraper):
                 known = self._known_doc_ids()
                 fresh = [r for r in upcoming if r['doc_id'] not in known]
                 self.logger.info(f"Harris {month_str}: {len(upcoming) - len(fresh)} already in the sheet, {len(fresh)} new to read")
+                print(f"::notice::Harris {month_str}: {len(upcoming)} upcoming, {len(upcoming) - len(fresh)} already in sheet, {len(fresh)} new", flush=True)
                 full = part = none = 0
                 for r in fresh:
                     doc_id = r['doc_id']

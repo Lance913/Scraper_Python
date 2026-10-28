@@ -132,6 +132,9 @@ def main():
             logger.info("DRY RUN — not writing to Sheets")
             for r in records:
                 logger.info(r)
+            c = Counter(r.get('county', '') for r in records)
+            a = Counter(r.get('county', '') for r in records if r.get('address'))
+            print(f"::notice::DRY RUN totals: {dict(c)} | with address: {dict(a)}", flush=True)
             return
         # Stamp the pull date (when the scraper ran) and record the daily counts.
         pull_date = (datetime.strptime(args.date, '%Y-%m-%d')
@@ -141,6 +144,7 @@ def main():
         new_by_county = Counter(r.get('county', '') for r in new_records)
         # Tracker records NEW leads per county (not everything re-scanned in the window).
         sheets_writer.update_daily_tracker(pull_date, new_by_county)
+        print(f"::notice::New rows: {dict(new_by_county)} | scanned: {dict(scanned_by_county)}", flush=True)
         logger.info(f"Done. {len(new_records)} new rows added (pull date {pull_date}). "
                     f"New per county: {dict(new_by_county)} | "
                     f"scanned per county: {dict(scanned_by_county)}")
