@@ -104,14 +104,36 @@ class HarrisCountyScraper(BaseScraper):
                     self.logger.warning(f"Harris: search click: {e}")
                 page.wait_for_timeout(3000)
 
-                content = page.content()
-                rows = self._parse_results_table(BeautifulSoup(content, 'lxml'))
-
-                # Collect this month's relative doc hrefs in the SAME order as rows.
-                hrefs = page.evaluate("""() => Array.from(document.querySelectorAll('a'))
-                    .filter(x=>/FRCL/.test(x.textContent||''))
-                    .map(a=>({id:a.textContent.trim(), href:a.getAttribute('href')}));""")
-                href_by_id = {h['id']: h['href'] for h in hrefs}
+                # 2026-10-28: the results grid is paged (840 rows for Nov 2026, ~20 per page) and we used to
+                # read page 1 only. Walk every page through the grid's own postback, collecting rows + doc links.
+                rows, href_by_id, seen_ids = [], {}, set()
+                pg = 1
+                while True:
+                    soup = BeautifulSoup(page.content(), 'lxml')
+                    page_rows = [r for r in self._parse_results_table(soup) if r['doc_id'] not in seen_ids]
+                    for h in page.evaluate("""() => Array.from(document.querySelectorAll('a'))
+                        .filter(x=>/FRCL/.test(x.textContent||''))
+                        .map(a=>({id:a.textContent.trim(), href:a.getAttribute('href')}));"""):
+                        href_by_id.setdefault(h['id'], h['href'])
+                    if not page_rows:
+                        break
+                    for r in page_rows: seen_ids.add(r['doc_id'])
+                    rows.extend(page_rows)
+                    pg += 1
+                    if pg > 200: break
+                    has_next = page.evaluate(f"""() => [...document.querySelectorAll('a')].some(a => (a.getAttribute('href')||'').includes("'Page${pg}'"))""")
+                    if not has_next:
+                        break
+                    try:
+                        with page.expect_navigation(wait_until='networkidle', timeout=30_000):
+                            page.evaluate(f"""() => __doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page${pg}')""")
+                    except Exception as e:
+                        self.logger.warning(f"Harris: page {pg} of {month_str}: {e}")
+                        break
+                    page.wait_for_timeout(500)
+                total_txt = re.search(r'([\d,]+) Row\(s\) Found', page.content())
+                self.logger.info(f"Harris {month_str} {year_val}: read {pg - 1} page(s), {len(rows)} rows"
+                                 + (f" (portal says {total_txt.group(1)})" if total_txt else ''))
 
                 # Filter to UPCOMING auctions only (sale_date >= today).
                 upcoming = []
@@ -127,9 +149,12 @@ class HarrisCountyScraper(BaseScraper):
                     browser.close()
                     return records
 
-                # OCR each upcoming doc.
+                # OCR only docs we haven't stored yet (the sheet already has the rest).
+                known = self._known_doc_ids()
+                fresh = [r for r in upcoming if r['doc_id'] not in known]
+                self.logger.info(f"Harris {month_str}: {len(upcoming) - len(fresh)} already in the sheet, {len(fresh)} new to read")
                 full = part = none = 0
-                for r in upcoming:
+                for r in fresh:
                     doc_id = r['doc_id']
                     href = href_by_id.get(doc_id)
                     rec_fields = {
@@ -175,6 +200,27 @@ class HarrisCountyScraper(BaseScraper):
             self.logger.error(f"Harris {month_str} {year_val}: {exc}", exc_info=True)
 
         return records
+
+    _known_cache = None
+
+    def _known_doc_ids(self) -> set:
+        """Doc IDs already in the leads sheet (needs GOOGLE_CREDENTIALS); empty set if the sheet can't be read."""
+        if HarrisCountyScraper._known_cache is not None:
+            return HarrisCountyScraper._known_cache
+        known = set()
+        try:
+            import os, json, gspread
+            if os.environ.get('GOOGLE_CREDENTIALS'):
+                import sheets_writer
+                ws = sheets_writer._get_client().open_by_key(sheets_writer.SPREADSHEET_ID).sheet1
+                hdr = ws.row_values(1)
+                if 'Doc ID' in hdr:
+                    known = {v.strip() for v in ws.col_values(hdr.index('Doc ID') + 1)[1:] if v.strip().startswith('FRCL')}
+                self.logger.info(f"Harris: {len(known)} doc IDs already in the sheet")
+        except Exception as e:
+            self.logger.warning(f"Harris: couldn't read existing doc IDs ({e}); reading every doc")
+        HarrisCountyScraper._known_cache = known
+        return known
 
     def _parse_results_table(self, soup: BeautifulSoup) -> List[Dict]:
         rows = []

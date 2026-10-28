@@ -74,7 +74,8 @@ def _useful(r: Dict) -> bool:
     for skip-tracing, so a name-only or doc-id-only record isn't actionable —
     and that are single-family (not a unit-numbered multi-family property)."""
     if not r.get('address'):
-        return False
+        # 2026-10-28: keep Harris notices whose scan couldn't be read (Doc ID + dates) instead of losing them
+        return bool(r.get('county') == 'Harris' and str(r.get('doc_id', '')).startswith('FRCL'))
     if is_multifamily(r.get('address'), r.get('city')):
         logger.info(f"Dropping multi-family/unit record: address={r.get('address')!r} "
                     f"city={r.get('city')!r} county={r.get('county')} doc_id={r.get('doc_id')}")

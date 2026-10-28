@@ -37,7 +37,7 @@ jobs:
   scrape:
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
@@ -76,6 +76,7 @@ jobs:
           # Each county has its own runner, so we can spend most of it on name OCR.
           PUBLICSEARCH_OCR_BUDGET: '2700'
           PUBLICSEARCH_OCR_MAX: '2000'
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}   # Harris reads the sheet's Doc IDs so it only OCRs new notices
           # Recorded-date window is set per-county in code (Dallas 60d, others 7d);
           # do NOT force it here or it overrides that for every county.
         run: |
