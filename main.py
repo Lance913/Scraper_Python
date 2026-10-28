@@ -148,8 +148,7 @@ def main():
         scanned_by_county = Counter(r.get('county', '') for r in records)
         new_records = sheets_writer.write_records(records, pull_date=pull_date)
         new_by_county = Counter(r.get('county', '') for r in new_records)
-        # Tracker records NEW leads per county (not everything re-scanned in the window).
-        sheets_writer.update_daily_tracker(pull_date, new_by_county)
+        # Daily Counts + Ready to Skip Trace are rebuilt from the master tab by build_tabs.py.
         print(f"::notice::New rows: {dict(new_by_county)} | scanned: {dict(scanned_by_county)}", flush=True)
         logger.info(f"Done. {len(new_records)} new rows added (pull date {pull_date}). "
                     f"New per county: {dict(new_by_county)} | "

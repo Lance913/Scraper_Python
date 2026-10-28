@@ -1,0 +1,16 @@
+name: Rebuild summary tabs
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '45 10 * * *'   # ~5:45 AM Texas time, after every scraper has written
+jobs:
+  tabs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11', cache: 'pip'}
+      - run: pip install -r requirements.txt
+      - env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: python build_tabs.py
