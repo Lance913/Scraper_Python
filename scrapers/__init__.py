@@ -1,4 +1,5 @@
 from .harris import HarrisCountyScraper
+from .pdf_counties import WilliamsonForeclosureScraper, FortBendForeclosureScraper, ComalForeclosureScraper
 from .counties import (
     BexarCountyScraper,
     DallasCountyScraper,
@@ -14,4 +15,5 @@ __all__ = [
     'TarrantCountyScraper',
     'DentonCountyScraper',
     'JohnsonCountyScraper',
+    'WilliamsonForeclosureScraper', 'FortBendForeclosureScraper', 'ComalForeclosureScraper',
 ]

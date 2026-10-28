@@ -10,9 +10,9 @@ on:
         required: false
         default: ''
       counties:
-        description: 'Counties: harris bexar dallas tarrant denton johnson'
+        description: 'Counties: harris bexar dallas tarrant denton johnson williamson fortbend comal'
         required: false
-        default: 'harris bexar dallas tarrant denton johnson'
+        default: 'harris bexar dallas tarrant denton johnson williamson fortbend comal'
       dry_run:
         description: 'Dry run? (true/false)'
         required: false
@@ -28,7 +28,7 @@ jobs:
       - id: set
         run: |
           COUNTIES="${{ github.event.inputs.counties }}"
-          if [ -z "$COUNTIES" ]; then COUNTIES="harris bexar dallas tarrant denton johnson"; fi
+          if [ -z "$COUNTIES" ]; then COUNTIES="harris bexar dallas tarrant denton johnson williamson fortbend comal"; fi
           ARR=$(echo "$COUNTIES" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -cs .)
           echo "matrix=$ARR" >> "$GITHUB_OUTPUT"
           echo "Matrix: $ARR"

@@ -24,6 +24,9 @@ from scrapers import (
     TarrantCountyScraper,
     DentonCountyScraper,
     JohnsonCountyScraper,
+    WilliamsonForeclosureScraper,
+    FortBendForeclosureScraper,
+    ComalForeclosureScraper,
 )
 import sheets_writer
 import zip_lookup
@@ -36,7 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('main')
 
-ALL_COUNTIES = ['harris', 'bexar', 'dallas', 'tarrant', 'denton', 'johnson']
+ALL_COUNTIES = ['harris', 'bexar', 'dallas', 'tarrant', 'denton', 'johnson', 'williamson', 'fortbend', 'comal']
 
 SCRAPER_MAP = {
     'harris':  HarrisCountyScraper,
@@ -45,6 +48,9 @@ SCRAPER_MAP = {
     'tarrant': TarrantCountyScraper,
     'denton':  DentonCountyScraper,
     'johnson': JohnsonCountyScraper,
+    'williamson': WilliamsonForeclosureScraper,
+    'fortbend': FortBendForeclosureScraper,
+    'comal': ComalForeclosureScraper,
 }
 
 
