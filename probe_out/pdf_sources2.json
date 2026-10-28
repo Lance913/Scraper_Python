@@ -1,0 +1,75 @@
+{
+ "fortbend_err": "[Errno 2] No such file or directory: 'pdftoppm'",
+ "comal_links": [
+  "/DocumentCenter/View/4547",
+  "/DocumentCenter/View/8771/November-3rd-Foreclosure-Sales",
+  "/DocumentCenter/View/984/Order-309-Designating-Location-of-Real-Property-Tax-Foreclosure-Sales-Jan-2013-PDF",
+  "/DocumentCenter/View/985/Order-451-Designating-Location-of-Foreclosure-Sales-Dec-2020-PDF",
+  "/DocumentCenter/View/986/Res-2021-11-Allowing-Online-Auctions-for-Tax-Foreclosure-Sales-and-to-Adopt-Rules-Governing-Online-Auctions-04-29-2021-PDF",
+  "/DocumentCenter/View/990/Property-Code-Section-51002-PDF"
+ ],
+ "comal_err": "[Errno 2] No such file or directory: 'pdftoppm'",
+ "wilco_root": {
+  "status": 200,
+  "links": [
+   "January/files.aspx",
+   "disclaimers/january.aspx",
+   "February/files.aspx",
+   "disclaimers/feb.aspx",
+   "March/files.aspx",
+   "disclaimers/march.aspx",
+   "April/files.aspx",
+   "disclaimers/april.aspx",
+   "May/files.aspx",
+   "disclaimers/may.aspx",
+   "June/files.aspx",
+   "disclaimers/june.aspx",
+   "July/files.aspx",
+   "disclaimers/july.aspx",
+   "August/files.aspx",
+   "disclaimers/august.aspx",
+   "September/files.aspx",
+   "disclaimers/september.aspx ",
+   "October/files.aspx",
+   "disclaimers/october.aspx ",
+   "November/files.aspx",
+   "disclaimers/november.aspx ",
+   "December/files.aspx",
+   "disclaimers/december.aspx"
+  ]
+ },
+ "wilco_November": {
+  "status": 200,
+  "n": 94,
+  "idx": [
+   "08-05-2026_File_IDX.pdf"
+  ],
+  "last5": [
+   "10-12-2026_File_007.pdf",
+   "10-13-2026_File_001.pdf",
+   "10-13-2026_File_002.pdf",
+   "10-13-2026_File_003.pdf",
+   "10-13-2026_File_004.pdf"
+  ]
+ },
+ "wilco_November_err": "[Errno 2] No such file or directory: 'pdftotext'",
+ "wilco_December": {
+  "status": 200,
+  "n": 70,
+  "idx": [],
+  "last5": [
+   "10-23-2026_File_011.pdf",
+   "10-23-2026_File_012.pdf",
+   "10-23-2026_File_013.pdf",
+   "10-23-2026_File_014.pdf",
+   "10-23-2026_File_015.pdf"
+  ]
+ },
+ "wilco_December_err": "[Errno 2] No such file or directory: 'pdftoppm'",
+ "wilco_January": {
+  "status": 200,
+  "n": 0,
+  "idx": [],
+  "last5": []
+ }
+}
