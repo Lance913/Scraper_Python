@@ -1,3 +1,4 @@
+import json
 """
 Harris County Foreclosure Scraper — with OCR document extraction.
 
@@ -121,7 +122,16 @@ class HarrisCountyScraper(BaseScraper):
                     rows.extend(page_rows)
                     pg += 1
                     if pg > 200: break
-                    has_next = page.evaluate(f"""() => [...document.querySelectorAll('a')].some(a => (a.getAttribute('href')||'').includes("'Page${pg}'"))""")
+                    pager = page.evaluate("""() => [...document.querySelectorAll('a,input,button,span')].map(e =>
+                        [e.tagName, (e.getAttribute('href')||'') + ' ' + (e.getAttribute('onclick')||'') + ' ' + (e.getAttribute('name')||''), (e.value||e.textContent||'').trim().slice(0,20)])
+                        .filter(x => /Page\\$|Next|>>|\\.\\.\\./i.test(x[1] + ' ' + x[2]))""")
+                    if pg == 2:
+                        print(f"::notice::Harris pager {month_str}: " + json.dumps(pager)[:900], flush=True)
+                    has_next = any(f"Page${pg}'" in x[1] or f'Page${pg}"' in x[1] for x in pager)
+                    if not has_next:
+                        nxt = [x for x in pager if re.search(r'Next|>>', x[2] + x[1], re.I)]
+                        if nxt:
+                            print(f"::notice::Harris {month_str}: using Next control " + json.dumps(nxt[0]), flush=True)
                     if not has_next:
                         break
                     try:
