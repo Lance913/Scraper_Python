@@ -50,6 +50,8 @@ RE_OWNER_EXTRA = [
     re.compile(r'\bwith\s+([A-Z][A-Za-z.\' ]{4,50}?)(?:\s+and\s+[^()]{3,60}?)?,?\s*\(grantor', re.I),
     re.compile(r'\bexecuted\s+by\s+([A-Z][A-Za-z.\' ]{4,50}?)(?:\s+and\s+[A-Z][A-Za-z.\' ]{3,40}?)?\s*,', re.I),
     re.compile(r'\bGrantor(?:\(s\))?\s*[:\-]\s*([A-Z][A-Za-z. ]{4,50}?)(?:\s+and\s+([A-Z][A-Za-z. ]{3,40}?))?\s*(?:,|\n|$)', re.I),
+    re.compile(r'\bGrantor(?:\(s\))?\s*[:\-]?\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+){1,2})\b'),
+    re.compile(r'\bBORROWERS?\s*[:\-]?\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+){1,2})\b'),
     re.compile(r'\bMortgagor(?:\(s\))?\s*[:\-]\s*([A-Z][A-Za-z. ]{4,50}?)\s*(?:,|\n|$)', re.I),
     re.compile(r'\bBorrower(?:\(s\))?\s*[:\-]\s*([A-Z][A-Za-z. ]{4,50}?)\s*(?:,|\n|$)', re.I),
     re.compile(r'\bMaker\s*[:\-]\s*([A-Z][A-Za-z. ]{4,50}?)\s*(?:,|\n|$)', re.I),

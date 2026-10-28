@@ -19,7 +19,9 @@ from datetime import date, datetime
 from typing import List, Dict
 from bs4 import BeautifulSoup
 from .base import BaseScraper
-from .harris_extract import extract_from_pdf_bytes
+from .harris_extract import extract_from_pdf_bytes, extract_from_text, ocr_pdf_bytes
+from . import harris_extract as _hx
+from . import pdf_counties as _pc
 
 SEARCH_URL  = "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx"
 APP_BASE    = "https://www.cclerk.hctx.net/applications/websearch/"
@@ -176,7 +178,15 @@ class HarrisCountyScraper(BaseScraper):
                     if href:
                         try:
                             body = ctx.request.get(APP_BASE + href).body()
-                            ex = extract_from_pdf_bytes(body)
+                            txt = ocr_pdf_bytes(body, max_pages=3, dpi=300)
+                            ex = extract_from_text(txt)
+                            # fill gaps with the looser reader used for the other PDF counties
+                            if not (ex['first_name'] and ex['address']):
+                                ex2 = _pc.extract(txt, _hx._is_harris_zip, _hx.HOUSTON_CITIES)
+                                for k in ('first_name', 'last_name', 'address', 'city', 'zip_code'):
+                                    if k in ('first_name', 'last_name') and ex['first_name']: continue
+                                    if k in ('address', 'city', 'zip_code') and ex['address']: continue
+                                    ex[k] = ex2.get(k, '') or ex.get(k, '')
                             rec_fields.update({
                                 'first_name': ex['first_name'],
                                 'last_name':  ex['last_name'],
