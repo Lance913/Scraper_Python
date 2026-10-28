@@ -125,8 +125,6 @@ class HarrisCountyScraper(BaseScraper):
                     pager = page.evaluate("""() => [...document.querySelectorAll('a,input,button,span')].map(e =>
                         [e.tagName, (e.getAttribute('href')||'') + ' ' + (e.getAttribute('onclick')||'') + ' ' + (e.getAttribute('name')||''), (e.value||e.textContent||'').trim().slice(0,20)])
                         .filter(x => /Page\\$|Next|>>|\\.\\.\\./i.test(x[1] + ' ' + x[2]))""")
-                    if pg == 2:
-                        print(f"::notice::Harris pager {month_str}: " + json.dumps(pager)[:900], flush=True)
                     has_next = any(f"Page${pg}'" in x[1] or f'Page${pg}"' in x[1] for x in pager)
                     if not has_next:
                         nxt = [x for x in pager if re.search(r'Next|>>', x[2] + x[1], re.I)]
@@ -134,9 +132,12 @@ class HarrisCountyScraper(BaseScraper):
                             print(f"::notice::Harris {month_str}: using Next control " + json.dumps(nxt[0]), flush=True)
                     if not has_next:
                         break
+                    # the grid sits in an AJAX UpdatePanel: no page navigation, so wait for the first doc ID to change
+                    first_id = page_rows[0]['doc_id']
                     try:
-                        with page.expect_navigation(wait_until='networkidle', timeout=30_000):
-                            page.evaluate(f"""() => __doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page${pg}')""")
+                        page.evaluate(f"""() => __doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page${pg}')""")
+                        page.wait_for_function("""fid => { const a = [...document.querySelectorAll('a')].find(x => /FRCL/.test(x.textContent||''));
+                            return a && a.textContent.trim() !== fid; }""", arg=first_id, timeout=45_000)
                     except Exception as e:
                         self.logger.warning(f"Harris: page {pg} of {month_str}: {e}")
                         break
@@ -206,6 +207,8 @@ class HarrisCountyScraper(BaseScraper):
 
                 self.logger.info(
                     f"Harris {month_str}: {full} full, {part} partial, {none} docid-only")
+                print(f"::notice::Harris {month_str} OCR: {full} name+address, {part} one of them, {none} nothing, "
+                      f"{sum(1 for r in fresh if not href_by_id.get(r['doc_id']))} without a doc link", flush=True)
                 browser.close()
 
         except Exception as exc:
