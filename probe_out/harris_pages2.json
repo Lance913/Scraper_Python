@@ -1,0 +1,145 @@
+{
+ "month_opts": [
+  [
+   "Select -",
+   "Select -"
+  ],
+  [
+   "12",
+   "December"
+  ],
+  [
+   "11",
+   "November"
+  ],
+  [
+   "10",
+   "October"
+  ],
+  [
+   "9",
+   "September"
+  ],
+  [
+   "8",
+   "August"
+  ],
+  [
+   "7",
+   "July"
+  ],
+  [
+   "6",
+   "June"
+  ],
+  [
+   "5",
+   "May"
+  ],
+  [
+   "4",
+   "April"
+  ],
+  [
+   "3",
+   "March"
+  ],
+  [
+   "2",
+   "February"
+  ],
+  [
+   "1",
+   "January"
+  ]
+ ],
+ "p1": [
+  [
+   "FRCL-2026-5654",
+   "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC4r5lhzEImkzlXLdS33pau57hYavmVK3wFtc+P7rvpIDFh3N06FXLSGiLJlYdlDaMVfY1BEmE1xW/RmiGhmpC2J"
+  ],
+  [
+   "FRCL-2026-5922",
+   "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NSvzTel3b4phRC1xP2A+jytCXd3WP3KYky/wjM5JoJ+VrNEdC8EKfA7PpfQr12TNybF3KdjlYZAG8qZqE6OfiRrj99aqUHq7QX501ds9/j0o"
+  ],
+  [
+   "FRCL-2026-5980",
+   "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC5BO0RBmJyGzNfu4PycgoQhBt2QjdOpT9/7Ogqsa2KV+jTJdzh0IKbrk2F4mnoWwsNQTDcT4L5Bfe+03gtOec6n"
+  ]
+ ],
+ "p1_url": "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx#",
+ "p1_count": 38,
+ "pb_err": "Page.evaluate: TypeError: 'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them\n    at Sys$WebForms$PageRequestManager.Sys$WebForms$PageRequestManager$_doPostBack [as _doPostBack] (https://www.cclerk.hctx.net/Applicatio",
+ "after_3s": [
+  "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx#",
+  [
+   [
+    "FRCL-2026-5654",
+    "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC4r5lhzEImkzlXLdS33pau57hYavmVK3wFtc+P7rvpIDFh3N06FXLSGiLJlYdlDaMVfY1BEmE1xW/RmiGhmpC2J"
+   ],
+   [
+    "FRCL-2026-5922",
+    "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NSvzTel3b4phRC1xP2A+jytCXd3WP3KYky/wjM5JoJ+VrNEdC8EKfA7PpfQr12TNybF3KdjlYZAG8qZqE6OfiRrj99aqUHq7QX501ds9/j0o"
+   ],
+   [
+    "FRCL-2026-5980",
+    "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC5BO0RBmJyGzNfu4PycgoQhBt2QjdOpT9/7Ogqsa2KV+jTJdzh0IKbrk2F4mnoWwsNQTDcT4L5Bfe+03gtOec6n"
+   ]
+  ]
+ ],
+ "after_8s": [
+  "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx#",
+  [
+   [
+    "FRCL-2026-5654",
+    "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC4r5lhzEImkzlXLdS33pau57hYavmVK3wFtc+P7rvpIDFh3N06FXLSGiLJlYdlDaMVfY1BEmE1xW/RmiGhmpC2J"
+   ],
+   [
+    "FRCL-2026-5922",
+    "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NSvzTel3b4phRC1xP2A+jytCXd3WP3KYky/wjM5JoJ+VrNEdC8EKfA7PpfQr12TNybF3KdjlYZAG8qZqE6OfiRrj99aqUHq7QX501ds9/j0o"
+   ],
+   [
+    "FRCL-2026-5980",
+    "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC5BO0RBmJyGzNfu4PycgoQhBt2QjdOpT9/7Ogqsa2KV+jTJdzh0IKbrk2F4mnoWwsNQTDcT4L5Bfe+03gtOec6n"
+   ]
+  ]
+ ],
+ "after_20s": [
+  "https://www.cclerk.hctx.net/applications/websearch/FRCL_R.aspx#",
+  [
+   [
+    "FRCL-2026-5654",
+    "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC4r5lhzEImkzlXLdS33pau57hYavmVK3wFtc+P7rvpIDFh3N06FXLSGiLJlYdlDaMVfY1BEmE1xW/RmiGhmpC2J"
+   ],
+   [
+    "FRCL-2026-5922",
+    "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NSvzTel3b4phRC1xP2A+jytCXd3WP3KYky/wjM5JoJ+VrNEdC8EKfA7PpfQr12TNybF3KdjlYZAG8qZqE6OfiRrj99aqUHq7QX501ds9/j0o"
+   ],
+   [
+    "FRCL-2026-5980",
+    "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC5BO0RBmJyGzNfu4PycgoQhBt2QjdOpT9/7Ogqsa2KV+jTJdzh0IKbrk2F4mnoWwsNQTDcT4L5Bfe+03gtOec6n"
+   ]
+  ]
+ ],
+ "click3": [
+  [
+   "FRCL-2026-6213",
+   "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NS3bRzpsleMPc8VGgBZ/oyFw0DMCfhoz4kjoGs+DSexpzkkiDe9wW/l0meUS5/MKP3gObim+yU+0i4oF4VeqWnfkN+qu5RATNC5dKzgW25fC"
+  ],
+  [
+   "FRCL-2026-6266",
+   "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC5/BqjuZeoGCcGPkOs1IaLLYDoQmkexMaDWDintJYWoTS55URjXOezWIksQJHhX2mTjxPDuO3jVNCVxW2CdYU+H"
+  ],
+  [
+   "FRCL-2026-6267",
+   "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NdRpQgMQd0Nsa06X5vPrNVSRWPsbjQFesqcCNABitmKwxxCSYwk63LmHb7RMzdqVEpVYVdlcHNUoMu8xvm9kU8EHsgTB2F3syr7513bhX6bP"
+  ]
+ ],
+ "href": "ViewECdocs.aspx?ID=bWXqGXasMeuE7YZXR3B2NUNXeLVZTKlhHSbKofnpRC4r5lhzEImkzlXLdS33pau57hYavmVK3wFtc+P7rvpIDFh3N06FXLSGiLJlYdlDaMVfY1BEmE1xW/RmiGhmpC2J",
+ "doc": {
+  "status": 200,
+  "ctype": "Application/pdf; charset=utf-8",
+  "len": 407489,
+  "head": "%PDF-1.4\n%\u00d3\u00f4\u00cc\u00e1\n1 0 obj\n<<\n/CreationDate(D:20261028091019-05'00')\n/Creator(PDFsharp 1.50.4000-gdi \\(www.pdfsharp.com\\))\n/Producer(PDFsharp 1.50.4000-gdi \\(www.pdfsharp.com\\))\n>>\nendobj\n2 0 obj\n<<\n/Type/Catalog\n/Pages 3 0 R\n>>\nendobj\n3 0 obj\n<<\n/Type/Pages\n/Count 2\n/Kids[6 0 R 9 0 R]\n>>\nendobj\n4 0 obj"
+ }
+}
