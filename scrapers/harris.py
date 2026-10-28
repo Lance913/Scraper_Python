@@ -168,7 +168,12 @@ class HarrisCountyScraper(BaseScraper):
                 self.logger.info(f"Harris {month_str}: {len(upcoming) - len(fresh)} already in the sheet, {len(fresh)} new to read")
                 print(f"::notice::Harris {month_str}: {len(upcoming)} upcoming, {len(upcoming) - len(fresh)} already in sheet, {len(fresh)} new", flush=True)
                 full = part = none = 0
+                import os, time as _t
+                budget_end = HarrisCountyScraper._t0 + 60 * float(os.environ.get('HARRIS_OCR_MINUTES', '200'))
                 for r in fresh:
+                    if _t.time() > budget_end:
+                        print(f"::notice::Harris {month_str}: time budget used, the rest are read on the next run", flush=True)
+                        break
                     doc_id = r['doc_id']
                     href = href_by_id.get(doc_id)
                     rec_fields = {
@@ -226,6 +231,7 @@ class HarrisCountyScraper(BaseScraper):
         return records
 
     _known_cache = None
+    _t0 = __import__('time').time()
 
     def _known_doc_ids(self) -> set:
         """Doc IDs already in the leads sheet (needs GOOGLE_CREDENTIALS); empty set if the sheet can't be read."""
