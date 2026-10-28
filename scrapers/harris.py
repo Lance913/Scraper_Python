@@ -122,22 +122,21 @@ class HarrisCountyScraper(BaseScraper):
                     rows.extend(page_rows)
                     pg += 1
                     if pg > 200: break
-                    pager = page.evaluate("""() => [...document.querySelectorAll('a,input,button,span')].map(e =>
-                        [e.tagName, (e.getAttribute('href')||'') + ' ' + (e.getAttribute('onclick')||'') + ' ' + (e.getAttribute('name')||''), (e.value||e.textContent||'').trim().slice(0,20)])
-                        .filter(x => /Page\\$|Next|>>|\\.\\.\\./i.test(x[1] + ' ' + x[2]))""")
-                    has_next = any(f"Page${pg}'" in x[1] or f'Page${pg}"' in x[1] for x in pager)
-                    if not has_next:
-                        nxt = [x for x in pager if re.search(r'Next|>>', x[2] + x[1], re.I)]
-                        if nxt:
-                            print(f"::notice::Harris {month_str}: using Next control " + json.dumps(nxt[0]), flush=True)
+                    # pager links: numbers, plus '...' to reach the next block of pages
+                    nums = page.evaluate("""() => [...document.querySelectorAll('a')].map(a => (a.textContent||'').trim()).filter(t => /^(\\d+|\\.\\.\\.)$/.test(t))""")
+                    target = str(pg) if str(pg) in nums else ('...' if '...' in nums else None)
+                    has_next = target is not None
                     if not has_next:
                         break
-                    # the grid sits in an AJAX UpdatePanel: no page navigation, so wait for the first doc ID to change
+                    # the grid sits in an AJAX UpdatePanel (no navigation, and calling __doPostBack from script fails):
+                    # click the pager link like a person, then wait for the first doc ID to change
                     first_id = page_rows[0]['doc_id']
                     try:
-                        page.evaluate(f"""() => __doPostBack('ctl00$ContentPlaceHolder1$GridView1','Page${pg}')""")
+                        links = page.locator('a').filter(has_text=re.compile(r'^\s*' + re.escape(target) + r'\s*$'))
+                        (links.last if target == '...' else links.first).click()
                         page.wait_for_function("""fid => { const a = [...document.querySelectorAll('a')].find(x => /FRCL/.test(x.textContent||''));
                             return a && a.textContent.trim() !== fid; }""", arg=first_id, timeout=45_000)
+                        page.wait_for_timeout(300)
                     except Exception as e:
                         self.logger.warning(f"Harris: page {pg} of {month_str}: {e}")
                         break
