@@ -1,6 +1,10 @@
 name: Rebuild summary tabs
 on:
   workflow_dispatch:
+    inputs:
+      since:
+        description: 'Ready to Skip Trace starts at this pull date (YYYY-MM-DD). Blank = latest day (Monday: from Friday)'
+        required: false
   schedule:
     - cron: '45 10 * * *'   # ~5:45 AM Texas time, after every scraper has written
 jobs:
@@ -13,4 +17,5 @@ jobs:
       - run: pip install -r requirements.txt
       - env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          READY_SINCE: ${{ github.event.inputs.since }}
         run: python build_tabs.py

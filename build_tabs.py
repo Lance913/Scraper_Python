@@ -8,7 +8,7 @@ Runs after every scraper writes (Scraper_Python collate job and the Collin/Ellis
 """
 import re
 from collections import defaultdict
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import gspread
 import sheets_writer as sw
@@ -65,10 +65,18 @@ def main(today: date = None):
         pd = _d(g(r, 'Date Pulled'))
         if a and pd and (a not in first_seen or pd < first_seen[a]): first_seen[a] = pd
     latest = max((d for d in per if d <= today), default=None)
+    # Monday's tab covers Friday through Monday; READY_SINCE (YYYY-MM-DD) sets any other start day
+    import os
+    since = latest
+    if os.environ.get('READY_SINCE'):
+        since = datetime.strptime(os.environ['READY_SINCE'], '%Y-%m-%d').date()
+    elif latest and latest.weekday() == 0:
+        since = latest - timedelta(days=3)
     ready, seen = [], set()
     for r in body:
         addr, a = g(r, 'Address'), _norm_addr(g(r, 'Address'))
-        if not a or a in seen or _d(g(r, 'Date Pulled')) != latest or first_seen.get(a) != latest: continue
+        pd = _d(g(r, 'Date Pulled'))
+        if not a or a in seen or not pd or not (since <= pd <= latest) or first_seen.get(a) != pd: continue
         sd = _d(g(r, 'Sale Date'))
         if sd and sd < today: continue
         if JUNK.search(addr) or is_multifamily(addr, g(r, 'City')) or not re.match(r'^\d', addr): continue
@@ -78,7 +86,7 @@ def main(today: date = None):
                       g(r, 'Doc ID'), g(r, 'Date Pulled')])
     ready.sort(key=lambda x: (x[4], _d(x[7]) or date.max))
     _replace_tab(ss, READY_TAB, [READY_HEADERS] + ready, index=1)
-    print(f'::notice::Ready to Skip Trace: {len(ready)} properties (pulled {latest}). '
+    print(f'::notice::Ready to Skip Trace: {len(ready)} properties (pulled {since} to {latest}). '
           f'Daily Counts: {len(out) - 1} days', flush=True)
 
 
