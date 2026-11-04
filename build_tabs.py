@@ -71,9 +71,9 @@ def main(today: date = None):
     if os.environ.get('READY_SINCE'):
         since = datetime.strptime(os.environ['READY_SINCE'], '%Y-%m-%d').date()
     elif latest:
-        # foreclosures go out Mon / Wed / Fri: each tab covers every pull since the last send
-        # Monday = Sat to Mon, Wednesday = Tue to Wed, Friday = Thu to Fri (other days: that day only)
-        since = latest - timedelta(days={0: 2, 2: 1, 4: 1}.get(latest.weekday(), 0))
+        # foreclosures go out once a week on Friday: Friday's tab covers the whole week (Saturday to Friday);
+        # on other days the tab shows the week so far (since the last Saturday)
+        since = latest - timedelta(days=(latest.weekday() - 5) % 7)
     ready, seen = [], set()
     for r in body:
         addr, a = g(r, 'Address'), _norm_addr(g(r, 'Address'))
